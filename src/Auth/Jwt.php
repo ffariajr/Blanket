@@ -18,7 +18,14 @@ final class Jwt
     {
         $now = time();
         $payload = [
-            'sub' => $user['id'],
+            // Cast to string: RFC 7519 requires "sub" be a StringOrURI.
+            // PyJWT (used by the WS server) enforces this strictly and
+            // rejects a JSON-number sub with InvalidSubjectError -- this
+            // isn't just spec pedantry, it's a real cross-language
+            // interop break between this PHP issuer and the Python
+            // verifier. Consumers cast back to int (see CurrentUser /
+            // Authenticator).
+            'sub' => (string) $user['id'],
             'username' => $user['username'],
             'display_name' => $user['display_name'],
             'is_admin' => $user['is_admin'],
