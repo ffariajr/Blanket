@@ -2,7 +2,7 @@
 
 Generated from the live `blanket` database on `db.dogmanjr.net`, reflecting
 migrations `0001_initial_schema.sql` through
-`0004_user_fields_tab_attribution_drop_granted_by.sql`. Source of truth is
+`0005_drop_tab_attribution_columns.sql`. Source of truth is
 `db/migrations/`; this file is a readable snapshot, not authoritative — if
 it ever disagrees with the migrations, the migrations win.
 
@@ -80,10 +80,8 @@ transitively to `spreadsheet_access` and `spreadsheet_history`).
 | spreadsheet_id | bigint unsigned | NO   | MUL | NULL              |                    |
 | name           | varchar(255)    | NO   |     | NULL              |                    |
 | position       | int unsigned    | NO   |     | NULL              |                    |
-| created_by     | bigint unsigned | NO   | MUL | 0                 |                    |
 | created_at     | timestamp       | NO   |     | CURRENT_TIMESTAMP | DEFAULT_GENERATED |
 | deleted_at     | timestamp       | YES  |     | NULL              |                    |
-| deleted_by     | bigint unsigned | YES  | MUL | NULL              |                    |
 +----------------+-----------------+------+-----+-------------------+-------------------+
 ```
 
@@ -94,21 +92,27 @@ transitively to `spreadsheet_access` and `spreadsheet_history`).
 | PRIMARY KEY                | id             | -              | -         |
 | KEY idx_tabs_spreadsheet   | spreadsheet_id | -              | -         |
 | FK fk_tabs_spreadsheet     | spreadsheet_id | spreadsheets(id) | CASCADE |
-| FK fk_tabs_created_by      | created_by     | users(id)      | RESTRICT  |
-| FK fk_tabs_deleted_by      | deleted_by     | users(id)      | RESTRICT  |
 +---------------------------+----------------+----------------+-----------+
 ```
 
 One row per tab/sheet within a spreadsheet. `spreadsheet_history` links to
-this table (via `tab_id`), not directly to `spreadsheets`. `created_by`
-follows the same 0-is-anonymous convention as `spreadsheet_history.saved_by`
-(a tab is always created by someone, possibly anonymous). `deleted_by` is a
-plain nullable column, not the 0-sentinel convention — it isn't part of any
-uniqueness constraint, so NULL ("hasn't happened yet") is the correct,
-clearest semantics, matching `deleted_at` beside it. App-level rule (not
-enforced by the schema): when a tab is deleted, flush its current content
-to `spreadsheet_history` first as a normal save, so the pre-deletion state
-is never lost or stale.
+this table (via `tab_id`), not directly to `spreadsheets`.
+
+No `created_by`/`deleted_by` columns here — tab creation and deletion
+attribution is *inferred* from `spreadsheet_history` instead of stored
+directly on this row. This requires two app-level rules the schema can't
+enforce on its own:
+- Tab creation MUST write an initial `spreadsheet_history` row
+  (`sequence = 1`) for the new `tab_id`, even if the tab starts empty,
+  attributed via `saved_by`/`saved_by_ip`/`saved_by_name` to whoever
+  created it. "Who created tab X" = `saved_by` of the row with
+  `MIN(sequence)` for that `tab_id`.
+- Tab deletion MUST write a final `spreadsheet_history` row for that
+  `tab_id` at the moment of deletion (flushing current content),
+  attributed to whoever deleted it — and no further row may ever be
+  written for that `tab_id` afterward, or the inference below breaks.
+  "Who deleted tab X" = `saved_by` of the row with `MAX(sequence)` for
+  that `tab_id`, when `tabs.deleted_at IS NOT NULL`.
 
 ## spreadsheet_access
 
@@ -187,18 +191,20 @@ sequence for that tab — a per-tab operation, not a whole-spreadsheet one
 
 ```
 users ----------------< spreadsheets >---------------- tabs >---------------- spreadsheet_history
-  ^  \                        |                          |  \                        |
-  |   \                       v                          |   \                       |
-  |    \-----------< spreadsheet_access                  |    \--- created_by/deleted_by -> users
-  |                     (also user_id -> users)           |
-  \--------------------------------------------------------------------------- saved_by
+  ^  \                        |                                                      |
+  |   \                       v                                                      |
+  |    \-----------< spreadsheet_access                                              |
+  |                     (also user_id -> users)                                      |
+  \-------------------------------------------------------------------------- saved_by
 ```
 
 - `spreadsheets.owner_id` → `users.id`
 - `tabs.spreadsheet_id` → `spreadsheets.id` (CASCADE)
-- `tabs.created_by` → `users.id`
-- `tabs.deleted_by` → `users.id`
 - `spreadsheet_history.tab_id` → `tabs.id` (CASCADE)
 - `spreadsheet_history.saved_by` → `users.id`
 - `spreadsheet_access.spreadsheet_id` → `spreadsheets.id` (CASCADE)
 - `spreadsheet_access.user_id` → `users.id`
+
+Tab creation/deletion attribution is *inferred* through
+`spreadsheet_history.saved_by`, not a direct edge from `tabs` to `users` —
+see the app-level rules noted under the `tabs` section above.
