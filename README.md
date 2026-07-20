@@ -34,7 +34,7 @@ On desktop, a fuller editing experience is available: multi-cell selection, drag
 - Accounts are created by an administrator; self-registration is not supported
 - Anonymous users can access a spreadsheet only if the owner has explicitly allowed it
 - If a user is granted access in the access table, they can view at minimum
-- A null user entry in the access table represents the anonymous access policy for that spreadsheet
+- A reserved sentinel user entry (id 0) in the access table represents the anonymous access policy for that spreadsheet
 
 ## Tech Stack
 
