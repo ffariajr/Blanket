@@ -26,8 +26,31 @@ final class Request
     public static function fromGlobals(): self
     {
         $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-        $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
+        $uriPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
+        $path = self::stripBasePath($uriPath);
         return new self($method, $path);
+    }
+
+    /**
+     * The app is served at https://church.dogmanjr.net/blanket/ in
+     * production but at the webroot with `php -S` in dev -- routes are
+     * registered without a prefix either way, so strip whatever base path
+     * the front controller is actually mounted under. Derived from
+     * SCRIPT_NAME (the physical script Apache/php -S executed), not
+     * REQUEST_URI (the possibly-rewritten virtual URL), so this needs no
+     * hardcoded "/blanket" anywhere and keeps working if the mount point
+     * ever changes.
+     */
+    private static function stripBasePath(string $uriPath): string
+    {
+        $scriptName = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
+        $basePath = rtrim(str_replace('\\', '/', dirname($scriptName)), '/');
+
+        if ($basePath !== '' && str_starts_with($uriPath, $basePath)) {
+            $uriPath = substr($uriPath, strlen($basePath));
+        }
+
+        return $uriPath === '' ? '/' : $uriPath;
     }
 
     public function input(string $key, mixed $default = null): mixed

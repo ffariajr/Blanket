@@ -18,4 +18,15 @@ final class Response
     {
         self::json(['error' => $message], $status);
     }
+
+    public static function raw(string $body, string $contentType, int $status = 200, array $headers = []): never
+    {
+        http_response_code($status);
+        header('Content-Type: ' . $contentType);
+        foreach ($headers as $name => $value) {
+            header("{$name}: {$value}");
+        }
+        echo $body;
+        exit;
+    }
 }
