@@ -1,0 +1,21 @@
+# Block direct access to application internals -- only index.php and
+# assets/ are meant to be reachable. Everything else (src/, bin/, vendor/,
+# db/, config, dependency metadata) is included by PHP, never requested
+# directly.
+RewriteEngine On
+
+RewriteRule ^(src|bin|vendor|db)(/|$) - [F,L]
+
+<FilesMatch "\.(env|sql|md|sh|lock|json|log)$">
+  Require all denied
+</FilesMatch>
+
+<Files ~ "^\.">
+  Require all denied
+</Files>
+
+# Front controller: anything that isn't a real file or directory (and
+# wasn't already blocked above) goes through index.php.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
