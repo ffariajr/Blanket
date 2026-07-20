@@ -10,6 +10,7 @@ final class Request
     public readonly string $path;
     /** @var array<string,string> */
     public readonly array $params;
+    private readonly string $rawBody;
     private readonly array $body;
     private readonly array $headers;
 
@@ -19,7 +20,8 @@ final class Request
         $this->method = $method;
         $this->path = $path;
         $this->params = $params;
-        $this->body = self::parseJsonBody();
+        $this->rawBody = self::readRawBody();
+        $this->body = self::parseJsonBody($this->rawBody);
         $this->headers = self::collectHeaders();
     }
 
@@ -58,6 +60,29 @@ final class Request
         return $this->body[$key] ?? $default;
     }
 
+    /**
+     * Like input(), but decodes the request body without forcing JSON
+     * objects to associative arrays. json_decode(..., true) (used for the
+     * plain $body backing input()) can't distinguish an empty JSON object
+     * {} from an empty JSON array [] -- both collapse to a PHP [] -- so a
+     * field whose value gets re-serialized later (e.g. a spreadsheet
+     * history `data` payload, see HistoryController::save()) would
+     * silently corrupt any empty nested object in it before it's ever
+     * written. Use this for such fields; use input() for plain scalars,
+     * which don't care.
+     */
+    public function inputPreservingObjects(string $key): mixed
+    {
+        if ($this->rawBody === '') {
+            return null;
+        }
+        $decoded = json_decode($this->rawBody);
+        if (!is_object($decoded)) {
+            return null;
+        }
+        return $decoded->$key ?? null;
+    }
+
     public function header(string $name): ?string
     {
         return $this->headers[strtolower($name)] ?? null;
@@ -89,10 +114,15 @@ final class Request
         return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
     }
 
-    private static function parseJsonBody(): array
+    private static function readRawBody(): string
     {
         $raw = file_get_contents('php://input');
-        if ($raw === false || $raw === '') {
+        return $raw === false ? '' : $raw;
+    }
+
+    private static function parseJsonBody(string $raw): array
+    {
+        if ($raw === '') {
             return [];
         }
         $decoded = json_decode($raw, true);

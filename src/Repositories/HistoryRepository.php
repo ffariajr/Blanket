@@ -137,7 +137,15 @@ final class HistoryRepository
         $row['sequence'] = (int) $row['sequence'];
         $row['saved_by'] = (int) $row['saved_by'];
         if (array_key_exists('data', $row)) {
-            $row['data'] = json_decode($row['data'], true);
+            // Decode WITHOUT the assoc-array flag: json_decode(..., true)
+            // can't distinguish an empty JSON object {} from an empty JSON
+            // array [] -- both collapse to a PHP [], and re-encoding later
+            // (e.g. Response::json()) then emits [] for what was
+            // originally an object. Decoding to stdClass instead preserves
+            // that distinction all the way through, since json_encode()
+            // always emits {} for a stdClass. Every consumer of this value
+            // must use object syntax (->) instead of array syntax.
+            $row['data'] = json_decode($row['data']);
         }
         return $row;
     }

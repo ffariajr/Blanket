@@ -60,8 +60,12 @@ final class HistoryController
             Response::error('Forbidden', 403);
         }
 
-        $data = $request->input('data');
-        if (!is_array($data)) {
+        // inputPreservingObjects(), not input(): the latter decodes with
+        // json_decode(..., true), which would silently turn any empty {}
+        // inside `data` into [] before it's ever written -- see
+        // Request::inputPreservingObjects() and HistoryRepository::cast().
+        $data = $request->inputPreservingObjects('data');
+        if (!is_object($data)) {
             Response::error('data is required', 422);
         }
 

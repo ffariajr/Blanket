@@ -72,7 +72,11 @@ final class CsvController
         }
 
         $current = $this->history->current($tabId);
-        $cells = (array) ($current['data']['cells'] ?? []);
+        // $current['data'] is a stdClass (see HistoryRepository::cast()) --
+        // object access, not array access, all the way down.
+        $dataObj = $current['data'] ?? null;
+        $cellsObj = (is_object($dataObj) && isset($dataObj->cells)) ? $dataObj->cells : new \stdClass();
+        $cells = (array) $cellsObj;
         $rows = $this->cellsToRows($cells);
 
         $filename = preg_replace('/[^A-Za-z0-9_-]+/', '_', $tab['name']) . '.csv';
@@ -131,7 +135,9 @@ final class CsvController
     }
 
     /**
-     * @param array<string,array{value?:string}> $cells
+     * @param array<string,object{value?:string}> $cells Each cell is a
+     *   decoded JSON object (stdClass), not an array -- see
+     *   HistoryRepository::cast().
      * @return list<list<string>>
      */
     private function cellsToRows(array $cells): array
@@ -145,7 +151,8 @@ final class CsvController
         $parsed = [];
         foreach ($cells as $ref => $cell) {
             [$col, $row] = $this->parseA1Ref((string) $ref);
-            $parsed[] = [$col, $row, (string) ($cell['value'] ?? '')];
+            $value = is_object($cell) ? ($cell->value ?? '') : '';
+            $parsed[] = [$col, $row, (string) $value];
             $maxRow = max($maxRow, $row);
             $maxCol = max($maxCol, $col);
         }
