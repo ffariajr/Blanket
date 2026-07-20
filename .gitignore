@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+vendor/
+composer.lock
+venv/
+.venv/
+__pycache__/
+*.pyc
