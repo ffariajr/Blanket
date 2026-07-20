@@ -30,6 +30,15 @@ fi
 
 RSYNC_ARGS=(
   -av --delete
+  # The deploy directory itself is owned by www-data; the claude user only
+  # has group write on its contents, not ownership of the directory entry
+  # -- rsync trying to sync the top-level destination directory's own
+  # mtime/permissions to match the source root fails with "Operation not
+  # permitted" (exit 23) even though every file transfers fine, since that
+  # requires owning the directory entry itself, not just group-write on
+  # its contents. Skip both to avoid that false-negative failure.
+  --omit-dir-times
+  --no-perms
   # No trailing slash: a trailing slash only matches a *directory* named
   # .git, which is true in a normal checkout but not in a git worktree
   # (there .git is a plain file pointing back at the main repo) -- a
