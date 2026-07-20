@@ -1,0 +1,43 @@
+# Blanket WebSocket server (real-time collaboration).
+#
+# Install as: /etc/systemd/system/blanket-ws.service
+# Then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now blanket-ws
+#
+# Assumes the ws-server/ directory (plus its venv and this repo's
+# .mysql.env / .app.env, placed one level above ws-server/ -- see
+# deploy/README.md) has been deployed to /var/www/blanket-ws/. Adjust
+# WorkingDirectory/ExecStart below if a different path is used.
+#
+# Runs as www-data, matching how the rest of this box's web apps run
+# (church.dogmanjr.net's PHP, api.dogmanjr.net's Flask app). www-data's
+# nologin shell is not a problem for systemd -- it execs the binary
+# directly, it doesn't need an interactive login shell.
+
+[Unit]
+Description=Blanket real-time collaboration WebSocket server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/blanket-ws/ws-server
+ExecStart=/var/www/blanket-ws/ws-server/venv/bin/python /var/www/blanket-ws/ws-server/server.py
+Restart=on-failure
+RestartSec=2
+
+# Logs go to the journal by default (journalctl -u blanket-ws).
+StandardOutput=journal
+StandardError=journal
+
+# Binds only 127.0.0.1:8765 (see ws-server/server.py) -- never reachable
+# directly from outside, only through the Apache proxy configured in
+# deploy/apache-websocket-proxy.conf. No sandboxing directives beyond the
+# unprivileged user were added here to keep this a minimal first version;
+# consider ProtectSystem=strict / ProtectHome=true / NoNewPrivileges=true
+# as a later hardening pass once the deployment path is finalized.
+
+[Install]
+WantedBy=multi-user.target

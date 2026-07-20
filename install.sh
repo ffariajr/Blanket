@@ -30,16 +30,26 @@ fi
 
 RSYNC_ARGS=(
   -av --delete
-  --exclude '.git/'
+  # No trailing slash: a trailing slash only matches a *directory* named
+  # .git, which is true in a normal checkout but not in a git worktree
+  # (there .git is a plain file pointing back at the main repo) -- a
+  # trailing-slash-only pattern would silently let that file sync straight
+  # into the public docroot if this script is ever run from a worktree.
+  --exclude '.git'
   --exclude '.gitignore'
-  --exclude '.mysql.env'
-  --exclude '.env'
-  --exclude '.env.*'
+  # Any dotenv-style secrets file (.mysql.env, .app.env, and anything else
+  # added later) -- a bare '.mysql.env'/'.env'/'.env.*' list here once
+  # missed .app.env entirely when it was added, letting it rsync straight
+  # into the public docroot. .htaccess also blocks *.env and dotfiles from
+  # being served, but this should never rely on that as the only layer.
+  --exclude '*.env'
   --exclude 'install.sh'
   --exclude 'README.md'
   --exclude 'MACHINE.md'
   --exclude 'REQUIREMENTS.md'
   --exclude 'ACCESS.md'
+  --exclude 'deploy/'
+  --exclude 'db/'
   --exclude 'tests/'
   --exclude 'ws-server/'
   --exclude 'venv/'
