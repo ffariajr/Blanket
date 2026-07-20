@@ -1,0 +1,186 @@
+:root {
+  --border: #d8dee4;
+  --accent: #2563eb;
+  --bg: #ffffff;
+  --muted: #6b7280;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #111827;
+  background: #f9fafb;
+}
+
+.hidden { display: none !important; }
+.muted { color: var(--muted); font-size: 0.9em; }
+.error { color: #b91c1c; }
+
+.centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 320px;
+  background: var(--bg);
+  padding: 1.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.login-form input, .login-form button {
+  padding: 0.6rem;
+  font-size: 1rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.login-form button, .inline-form button, .toolbar button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  cursor: pointer;
+}
+
+.page { padding: 0.5rem 1rem 1rem; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.topbar h1 { font-size: 1.1rem; margin: 0; flex: 1; }
+.link { color: var(--accent); text-decoration: none; background: none; border: none; cursor: pointer; }
+
+.ws-status { font-size: 0.8rem; color: var(--muted); }
+
+.inline-form { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+.inline-form input { flex: 1; padding: 0.5rem; border-radius: 6px; border: 1px solid var(--border); }
+
+.sheet-list, .tab-list, .history-list { list-style: none; padding: 0; margin: 0; }
+.sheet-list li, .tab-list li, .history-list li {
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.sheet-list a, .tab-list a { text-decoration: none; color: #111827; }
+
+.tab-nav {
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+  margin-bottom: 0.5rem;
+}
+.tab-nav a {
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px 6px 0 0;
+  background: #eef2f6;
+  color: #374151;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.tab-nav a.active { background: var(--accent); color: white; }
+
+.toolbar {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.toolbar button, .toolbar input[type="color"] {
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.file-btn { position: relative; overflow: hidden; display: inline-block; background: var(--accent); color: white; padding: 0.4rem 0.7rem; border-radius: 6px; cursor: pointer; }
+.file-btn input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+.grid-scroll {
+  overflow: auto;
+  border: 1px solid var(--border);
+  max-height: 70vh;
+  max-width: 100%;
+}
+
+table.grid { border-collapse: collapse; }
+table.grid th, table.grid td {
+  border: 1px solid var(--border);
+  min-width: 90px;
+  height: 28px;
+  padding: 2px 6px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+table.grid thead th, table.grid tbody th {
+  background: #f3f4f6;
+  position: sticky;
+  font-weight: 500;
+  color: var(--muted);
+}
+table.grid thead th { top: 0; z-index: 2; }
+table.grid tbody th { left: 0; z-index: 1; }
+table.grid thead th:first-child { left: 0; z-index: 3; }
+
+table.grid td { cursor: cell; position: relative; }
+table.grid td.selected { outline: 2px solid var(--accent); outline-offset: -2px; background: #eff6ff; }
+table.grid td.bold { font-weight: 700; }
+table.grid td.italic { font-style: italic; }
+
+.cell-input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  font: inherit;
+  padding: 0;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+.modal-content {
+  background: white;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow: auto;
+}
+.history-list li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+
+/* Desktop: wider min column width for the "fuller editing experience"
+   the README asks for; mobile keeps columns compact for thumb use. */
+@media (min-width: 768px) {
+  table.grid th, table.grid td { min-width: 120px; }
+  .grid-scroll { max-height: 75vh; }
+}
+
+/* Mobile: bigger tap targets, stacked toolbar. */
+@media (max-width: 767px) {
+  .toolbar button, .toolbar input[type="color"], .file-btn { padding: 0.55rem 0.9rem; }
+  table.grid th, table.grid td { height: 34px; }
+  .topbar h1 { font-size: 1rem; }
+}

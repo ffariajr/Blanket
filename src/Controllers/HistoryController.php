@@ -43,6 +43,40 @@ final class HistoryController
         Response::json(['history' => $this->history->listForTab($tabId, $limit)]);
     }
 
+    /**
+     * Direct save of the full current cell state -- the REST fallback path
+     * for when a client has no live WebSocket session (the WS server is
+     * otherwise the sole writer while one is active). Same
+     * HistoryRepository::save() write path as everything else, so it gets
+     * the same sequence allocation/locking/attribution.
+     */
+    public function save(Request $request): void
+    {
+        $user = Authenticator::resolve($request);
+        $tabId = (int) $request->params['id'];
+        [, $spreadsheet] = $this->requireTabAndSpreadsheet($tabId);
+
+        if (!$this->permissions->canEdit($spreadsheet, $user)) {
+            Response::error('Forbidden', 403);
+        }
+
+        $data = $request->input('data');
+        if (!is_array($data)) {
+            Response::error('data is required', 422);
+        }
+
+        $editorName = $request->input('editor_name');
+        $sequence = $this->history->save(
+            $tabId,
+            $data,
+            $user,
+            $request->clientIp(),
+            is_string($editorName) ? $editorName : null,
+        );
+
+        Response::json(['sequence' => $sequence]);
+    }
+
     public function restore(Request $request): void
     {
         $user = Authenticator::resolve($request);

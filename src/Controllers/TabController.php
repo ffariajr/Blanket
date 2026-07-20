@@ -55,7 +55,7 @@ final class TabController
 
         $this->history->save(
             $tabId,
-            ['rows' => []],
+            ['cells' => (object) []],
             $user,
             $request->clientIp(),
             is_string($editorName) ? $editorName : null,
@@ -115,7 +115,7 @@ final class TabController
         $editorName = $request->input('editor_name');
         $this->history->save(
             $tabId,
-            $current['data'] ?? ['rows' => []],
+            $current['data'] ?? ['cells' => (object) []],
             $user,
             $request->clientIp(),
             is_string($editorName) ? $editorName : null,

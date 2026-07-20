@@ -4,7 +4,9 @@
 # directly.
 RewriteEngine On
 
-RewriteRule ^(src|bin|vendor|db)(/|$) - [F,L]
+RewriteRule ^(src|bin|vendor|db|ws-server)(/|$) - [F,L]
+
+RewriteRule ^dev-router\.php$ - [F,L]
 
 <FilesMatch "\.(env|sql|md|sh|lock|json|log)$">
   Require all denied

@@ -15,11 +15,11 @@ use Blanket\Repositories\TabRepository;
 /**
  * CSV import is a normal save through HistoryRepository::save() -- not a
  * separate write path -- so it gets the same sequence allocation, locking,
- * and attribution as any other edit. Grid shape is the same simple
- * {"rows": [[...], ...]} convention used by TabController::create(); the
- * real cell/formula/formatting JSON schema is still TBD (frontend, task
- * #8), so this deliberately stays a plain 2D grid mapping, not a
- * formula-aware exporter.
+ * and attribution as any other edit. Grid shape is the canonical
+ * {"cells": {"A1": {"value": "..."}}} schema (see CELL_SCHEMA.md) -- CSV
+ * rows/columns are converted to/from A1-style cell references. Export
+ * writes each cell's raw `value` (a formula's literal text, not a computed
+ * result -- nothing server-side evaluates formulas).
  */
 final class CsvController
 {
@@ -47,11 +47,12 @@ final class CsvController
         }
 
         $rows = $this->parseCsv($csv);
+        $cells = $this->rowsToCells($rows);
         $editorName = $request->input('editor_name');
 
         $sequence = $this->history->save(
             $tabId,
-            ['rows' => $rows],
+            ['cells' => (object) $cells],
             $user,
             $request->clientIp(),
             is_string($editorName) ? $editorName : null,
@@ -71,7 +72,8 @@ final class CsvController
         }
 
         $current = $this->history->current($tabId);
-        $rows = $current['data']['rows'] ?? [];
+        $cells = (array) ($current['data']['cells'] ?? []);
+        $rows = $this->cellsToRows($cells);
 
         $filename = preg_replace('/[^A-Za-z0-9_-]+/', '_', $tab['name']) . '.csv';
         Response::raw(
@@ -108,6 +110,77 @@ final class CsvController
         $csv = stream_get_contents($handle);
         fclose($handle);
         return $csv;
+    }
+
+    /**
+     * @param list<list<string>> $rows
+     * @return array<string,array{value:string}>
+     */
+    private function rowsToCells(array $rows): array
+    {
+        $cells = [];
+        foreach ($rows as $r => $row) {
+            foreach ($row as $c => $value) {
+                if ($value === '' || $value === null) {
+                    continue; // sparse: a blank cell has no key at all
+                }
+                $cells[$this->colIndexToLetter((int) $c) . ($r + 1)] = ['value' => (string) $value];
+            }
+        }
+        return $cells;
+    }
+
+    /**
+     * @param array<string,array{value?:string}> $cells
+     * @return list<list<string>>
+     */
+    private function cellsToRows(array $cells): array
+    {
+        if ($cells === []) {
+            return [];
+        }
+
+        $maxRow = 0;
+        $maxCol = 0;
+        $parsed = [];
+        foreach ($cells as $ref => $cell) {
+            [$col, $row] = $this->parseA1Ref((string) $ref);
+            $parsed[] = [$col, $row, (string) ($cell['value'] ?? '')];
+            $maxRow = max($maxRow, $row);
+            $maxCol = max($maxCol, $col);
+        }
+
+        $grid = array_fill(0, $maxRow + 1, array_fill(0, $maxCol + 1, ''));
+        foreach ($parsed as [$col, $row, $value]) {
+            $grid[$row][$col] = $value;
+        }
+        return $grid;
+    }
+
+    private function colIndexToLetter(int $index): string
+    {
+        $letter = '';
+        $index++;
+        while ($index > 0) {
+            $rem = ($index - 1) % 26;
+            $letter = chr(65 + $rem) . $letter;
+            $index = intdiv($index - 1, 26);
+        }
+        return $letter;
+    }
+
+    /** @return array{0:int,1:int} [0-based col, 0-based row] */
+    private function parseA1Ref(string $ref): array
+    {
+        preg_match('/^([A-Z]+)(\d+)$/', $ref, $m);
+        [, $letters, $rowStr] = $m + [null, '', '1'];
+
+        $col = 0;
+        foreach (str_split($letters) as $char) {
+            $col = $col * 26 + (ord($char) - 64);
+        }
+
+        return [$col - 1, ((int) $rowStr) - 1];
     }
 
     /** @return array{0:array,1:array} [tab, spreadsheet] */

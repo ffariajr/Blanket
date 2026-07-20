@@ -43,6 +43,7 @@ $router->add('DELETE', '/api/tabs/{id}', fn (Request $r) => (new TabController()
 $router->add('GET', '/api/tabs/{id}/current', fn (Request $r) => (new HistoryController())->current($r));
 $router->add('GET', '/api/tabs/{id}/history', fn (Request $r) => (new HistoryController())->list($r));
 $router->add('POST', '/api/tabs/{id}/restore', fn (Request $r) => (new HistoryController())->restore($r));
+$router->add('POST', '/api/tabs/{id}/save', fn (Request $r) => (new HistoryController())->save($r));
 
 $router->add('GET', '/api/spreadsheets/{spreadsheet_id}/access', fn (Request $r) => (new AccessController())->index($r));
 $router->add('PUT', '/api/spreadsheets/{spreadsheet_id}/access/{user_id}', fn (Request $r) => (new AccessController())->grant($r));

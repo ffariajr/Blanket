@@ -35,17 +35,23 @@ RSYNC_ARGS=(
   --exclude '.mysql.env'
   --exclude '.env'
   --exclude '.env.*'
+  --exclude '*.env'
   --exclude 'install.sh'
+  --exclude 'dev-router.php'
   --exclude 'README.md'
   --exclude 'MACHINE.md'
   --exclude 'REQUIREMENTS.md'
   --exclude 'ACCESS.md'
+  --exclude 'CELL_SCHEMA.md'
+  --exclude 'db/'
+  --exclude 'deploy/'
   --exclude 'tests/'
   --exclude 'ws-server/'
   --exclude 'venv/'
   --exclude '.venv/'
   --exclude '__pycache__/'
   --exclude '*.pyc'
+  --exclude '.claude/'
 )
 
 if [ "$DRY_RUN" -eq 1 ]; then
