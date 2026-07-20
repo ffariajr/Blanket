@@ -2,7 +2,6 @@
 .env.*
 !.env.example
 vendor/
-composer.lock
 venv/
 .venv/
 __pycache__/
