@@ -28,6 +28,32 @@ export function setDisplayName(name) {
   document.cookie = `blanket_name=${encodeURIComponent(name)}; path=${APP_BASE}; max-age=${oneYear}; samesite=lax`;
 }
 
+/**
+ * Decodes (does not verify -- the server verifies on every request; this
+ * is purely for UI decisions like "is this user the owner, show the Share
+ * button") the JWT payload so the client knows who's logged in without an
+ * extra round-trip. Mirrors the claim shape Blanket\Auth\Jwt::issue()
+ * puts in the token: sub (as a string, see src/Auth/Jwt.php), username,
+ * display_name, is_admin.
+ */
+export function getCurrentUser() {
+  const token = getToken();
+  if (!token) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return {
+      id: parseInt(payload.sub, 10),
+      username: payload.username,
+      displayName: payload.display_name,
+      isAdmin: !!payload.is_admin,
+    };
+  } catch {
+    return null;
+  }
+}
+
 class ApiError extends Error {
   constructor(status, body) {
     super((body && body.error) || `Request failed (${status})`);
@@ -86,6 +112,8 @@ export const api = {
   importCsv: (tabId, csv, editorName) =>
     request('POST', `/tabs/${tabId}/import-csv`, { csv, editor_name: editorName }),
   exportCsvUrl: (tabId) => `${API_BASE}/tabs/${tabId}/export-csv`,
+
+  lookupUser: (username) => request('GET', `/users/lookup?username=${encodeURIComponent(username)}`),
 };
 
 export { ApiError };

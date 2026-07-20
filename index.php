@@ -10,6 +10,7 @@ use Blanket\Controllers\CsvController;
 use Blanket\Controllers\HistoryController;
 use Blanket\Controllers\SpreadsheetController;
 use Blanket\Controllers\TabController;
+use Blanket\Controllers\UserController;
 use Blanket\Http\Request;
 use Blanket\Http\Response;
 use Blanket\Http\Router;
@@ -51,5 +52,7 @@ $router->add('DELETE', '/api/spreadsheets/{spreadsheet_id}/access/{user_id}', fn
 
 $router->add('POST', '/api/tabs/{id}/import-csv', fn (Request $r) => (new CsvController())->import($r));
 $router->add('GET', '/api/tabs/{id}/export-csv', fn (Request $r) => (new CsvController())->export($r));
+
+$router->add('GET', '/api/users/lookup', fn (Request $r) => (new UserController())->lookup($r));
 
 $router->dispatch(Request::fromGlobals());

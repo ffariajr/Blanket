@@ -34,6 +34,35 @@ final class UserRepository
         return $row;
     }
 
+    /**
+     * Lean lookup for the "share with username X" flow -- deliberately
+     * excludes password_hash/email/is_admin/enabled, which findByUsername()
+     * returns but a sharing owner has no business learning about someone
+     * else's account.
+     *
+     * @return array{id:int,username:string,display_name:string}|null
+     */
+    public function findPublicByUsername(string $username): ?array
+    {
+        if ($username === '__anonymous__') {
+            return null;
+        }
+
+        $stmt = Db::connection()->prepare(
+            'SELECT id, username, display_name
+             FROM users
+             WHERE username = :username AND deleted_at IS NULL'
+        );
+        $stmt->execute(['username' => $username]);
+        $row = $stmt->fetch();
+        if ($row === false) {
+            return null;
+        }
+
+        $row['id'] = (int) $row['id'];
+        return $row;
+    }
+
     public function create(
         string $username,
         string $email,

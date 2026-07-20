@@ -1,4 +1,4 @@
-import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName } from './api.js';
+import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser } from './api.js';
 import { Grid } from './grid.js';
 import { TabSocket } from './ws.js';
 
@@ -89,7 +89,7 @@ function renderLogin() {
     el('h1', {}, 'Blanket'),
     username,
     password,
-    el('button', { type: 'submit' }, 'Log in'),
+    el('button', { class: 'btn btn-block', type: 'submit' }, 'Log in'),
     error,
     el('p', { class: 'muted' }, 'Have a link to a shared spreadsheet? Just open it — no login needed if the owner allowed anonymous access.'),
   ]);
@@ -121,7 +121,7 @@ async function renderSheetsList() {
       newTitle.value = '';
       await refresh();
     },
-  }, [newTitle, el('button', { type: 'submit' }, 'Create')]);
+  }, [newTitle, el('button', { class: 'btn', type: 'submit' }, 'Create')]);
 
   mount(el('div', { class: 'page' }, [
     el('header', { class: 'topbar' }, [
@@ -153,7 +153,7 @@ async function renderSheetTabs(spreadsheetId) {
       const created = await api.createTab(spreadsheetId, newName.value.trim(), getDisplayName());
       window.location.hash = `#/sheets/${spreadsheetId}/tabs/${created.id}`;
     },
-  }, [newName, el('button', { type: 'submit' }, 'Add tab')]);
+  }, [newName, el('button', { class: 'btn', type: 'submit' }, 'Add tab')]);
 
   mount(el('div', { class: 'page' }, [
     el('header', { class: 'topbar' }, [
@@ -181,6 +181,9 @@ async function renderSheet(spreadsheetId, tabId) {
   const readOnly = false; // grid itself doesn't know permissions; server rejects unauthorized writes either way
   const cells = (current.data && current.data.cells) || {};
 
+  const me = getCurrentUser();
+  const canManageAccess = !!spreadsheet && !!me && (me.isAdmin || spreadsheet.owner_id === me.id);
+
   const statusEl = el('span', { class: 'ws-status' }, 'connecting…');
   const gridContainer = el('div', { class: 'grid-container' });
   const grid = new Grid(gridContainer, {
@@ -202,20 +205,21 @@ async function renderSheet(spreadsheetId, tabId) {
   });
 
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { onclick: () => grid.applyFormatToSelection({ bold: true }) }, 'B'),
-    el('button', { onclick: () => grid.applyFormatToSelection({ italic: true }) }, 'I'),
+    el('button', { class: 'btn btn-icon', onclick: () => grid.applyFormatToSelection({ bold: true }) }, 'B'),
+    el('button', { class: 'btn btn-icon', onclick: () => grid.applyFormatToSelection({ italic: true }) }, 'I'),
     el('input', {
-      type: 'color', title: 'Text color',
+      class: 'btn-color', type: 'color', title: 'Text color',
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
     }),
     el('input', {
-      type: 'color', title: 'Background', value: '#ffffff',
+      class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff',
       onchange: (e) => grid.applyFormatToSelection({ bg: e.target.value }),
     }),
-    el('button', { onclick: () => socket.requestSave() }, 'Save now'),
-    el('button', { onclick: () => showHistory(tabId, grid) }, 'History'),
-    el('button', { onclick: () => exportCsv(tabId) }, 'Export CSV'),
-    el('label', { class: 'file-btn' }, [
+    el('button', { class: 'btn', onclick: () => socket.requestSave() }, 'Save now'),
+    el('button', { class: 'btn', onclick: () => showHistory(tabId, grid) }, 'History'),
+    canManageAccess ? el('button', { class: 'btn', onclick: () => showShare(spreadsheetId) }, 'Share') : null,
+    el('button', { class: 'btn', onclick: () => exportCsv(tabId) }, 'Export CSV'),
+    el('label', { class: 'btn file-btn' }, [
       'Import CSV',
       el('input', { type: 'file', accept: '.csv', onchange: (e) => importCsv(tabId, e, grid) }),
     ]),
@@ -282,6 +286,7 @@ async function showHistory(tabId, grid) {
   for (const h of history) {
     const label = `#${h.sequence} — ${h.saved_by_name || 'Anonymous'} — ${h.created_at}`;
     const btn = el('button', {
+      class: 'btn btn-small',
       onclick: async () => {
         await api.restoreVersion(tabId, h.sequence, getDisplayName());
         const current = await api.currentTabState(tabId);
@@ -295,10 +300,102 @@ async function showHistory(tabId, grid) {
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'History'),
       list,
-      el('button', { onclick: () => dialog.remove() }, 'Close'),
+      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
     ]),
   ]);
   document.body.appendChild(dialog);
+}
+
+const ACCESS_LEVELS = [
+  ['none', 'No access'],
+  ['view', 'Can view'],
+  ['edit', 'Can view and edit'],
+];
+
+async function showShare(spreadsheetId) {
+  const body = el('div', { class: 'share-body' });
+  const error = el('p', { class: 'error hidden' });
+
+  async function refresh() {
+    body.textContent = '';
+    error.classList.add('hidden');
+    const { access } = await api.listAccess(spreadsheetId);
+    const anonRow = access.find((a) => a.user_id === 0);
+    const userRows = access.filter((a) => a.user_id !== 0);
+
+    const anonSelect = el(
+      'select',
+      {
+        onchange: async (e) => {
+          const level = e.target.value;
+          if (level === 'none') await api.revokeAccess(spreadsheetId, 0);
+          else await api.grantAccess(spreadsheetId, 0, level);
+          await refresh();
+        },
+      },
+      ACCESS_LEVELS.map(([value, label]) =>
+        el('option', { value, selected: value === (anonRow ? anonRow.access_level : 'none') || null }, label))
+    );
+
+    const userList = el('ul', { class: 'access-list' });
+    for (const a of userRows) {
+      userList.appendChild(el('li', {}, [
+        el('span', {}, `${a.display_name || a.username} (${a.username}) — ${a.access_level}`),
+        el('button', {
+          class: 'btn btn-small btn-danger',
+          onclick: async () => { await api.revokeAccess(spreadsheetId, a.user_id); await refresh(); },
+        }, 'Revoke'),
+      ]));
+    }
+
+    const shareUsername = el('input', { type: 'text', placeholder: 'Username' });
+    const shareLevel = el('select', {}, [
+      el('option', { value: 'view' }, 'Can view'),
+      el('option', { value: 'edit' }, 'Can view and edit'),
+    ]);
+    const shareForm = el('form', {
+      class: 'inline-form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const username = shareUsername.value.trim();
+        if (!username) return;
+        try {
+          const found = await api.lookupUser(username);
+          await api.grantAccess(spreadsheetId, found.id, shareLevel.value);
+          shareUsername.value = '';
+          await refresh();
+        } catch {
+          error.textContent = `No user found with username "${username}".`;
+          error.classList.remove('hidden');
+        }
+      },
+    }, [shareUsername, shareLevel, el('button', { class: 'btn', type: 'submit' }, 'Share')]);
+
+    body.appendChild(el('div', { class: 'share-section' }, [
+      el('h3', {}, 'Anonymous access'),
+      el('p', { class: 'muted' }, 'Anyone with the link, without logging in.'),
+      anonSelect,
+    ]));
+    body.appendChild(el('div', { class: 'share-section' }, [
+      el('h3', {}, 'People with access'),
+      userRows.length ? userList : el('p', { class: 'muted' }, 'Not shared with anyone by username yet.'),
+    ]));
+    body.appendChild(el('div', { class: 'share-section' }, [
+      el('h3', {}, 'Share with someone'),
+      shareForm,
+    ]));
+  }
+
+  const dialog = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-content' }, [
+      el('h2', {}, 'Share'),
+      error,
+      body,
+      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
+    ]),
+  ]);
+  document.body.appendChild(dialog);
+  await refresh();
 }
 
 function exportCsv(tabId) {

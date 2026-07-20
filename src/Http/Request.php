@@ -60,6 +60,11 @@ final class Request
         return $this->body[$key] ?? $default;
     }
 
+    public function query(string $key, mixed $default = null): mixed
+    {
+        return $_GET[$key] ?? $default;
+    }
+
     /**
      * Like input(), but decodes the request body without forcing JSON
      * objects to associative arrays. json_decode(..., true) (used for the

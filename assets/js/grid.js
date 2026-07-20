@@ -33,6 +33,11 @@ export class Grid {
     this.selected = null; // {row, col}
     this.anchor = null; // for range selection
     this.editingInput = null;
+    this._dragging = false;
+    // In-app clipboard fallback for when the OS Clipboard API is
+    // unavailable (non-secure context, permission denied) -- copy/paste
+    // still work within the app itself either way.
+    this._internalClipboard = '';
     this._build();
   }
 
@@ -87,7 +92,17 @@ export class Grid {
     table.appendChild(tbody);
     this.container.appendChild(table);
 
-    table.addEventListener('click', (e) => this._onCellClick(e));
+    // Selection is driven off mousedown/mousemove/mouseup (drag-to-select
+    // a range), not a plain 'click' listener -- a click is just a
+    // mousedown+mouseup with no movement in between, so this subsumes
+    // single-cell selection too. This also lets us preventDefault() on
+    // mousedown, which stops the browser's native text-selection/highlight
+    // behavior that otherwise kicks in when dragging across table cells
+    // (there's no actual DOM text selection API involved in our own
+    // range-select, so nothing is lost by suppressing the native one).
+    table.addEventListener('mousedown', (e) => this._onMouseDown(e));
+    table.addEventListener('mousemove', (e) => this._onMouseMoveDrag(e));
+    document.addEventListener('mouseup', () => this._onMouseUp());
     table.addEventListener('dblclick', (e) => this._onCellDblClick(e));
     document.addEventListener('keydown', (e) => this._onKeyDown(e));
     document.addEventListener('paste', (e) => this._onPaste(e));
@@ -98,6 +113,24 @@ export class Grid {
 
   _cellEl(ref) {
     return this.table.querySelector(`td[data-ref="${ref}"]`);
+  }
+
+  /**
+   * Whether keyboard shortcuts (arrows, Delete, Ctrl+C/V, etc.) should
+   * defer to some other on-page control instead of acting on the grid.
+   * Cells aren't focusable (td.tabIndex = -1, never explicitly focused),
+   * so document.activeElement after selecting a cell is normally
+   * document.body -- but it becomes whatever the user last focused
+   * (a toolbar button, a dialog's username field, ...) once they've
+   * interacted with anything else, without that meaning they're done
+   * with the grid. Only actually defer when focus is in something that
+   * itself wants keyboard input -- a real input/textarea/contenteditable
+   * outside the grid -- not merely "not literally body".
+   */
+  _keyboardShouldDeferToOtherControl() {
+    const active = document.activeElement;
+    if (!active || active === document.body || this.container.contains(active)) return false;
+    return active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable;
   }
 
   _renderAll() {
@@ -128,10 +161,28 @@ export class Grid {
     return isNaN(n) ? 0 : n;
   }
 
-  _onCellClick(e) {
+  _onMouseDown(e) {
     const td = e.target.closest('td');
     if (!td) return;
+    // Stop native text-selection/drag-highlight; our own selection
+    // handling below is what should happen instead.
+    e.preventDefault();
+    this._dragging = true;
     this._select(td.dataset.ref, e.shiftKey);
+  }
+
+  _onMouseMoveDrag(e) {
+    if (!this._dragging) return;
+    const td = e.target.closest('td');
+    if (!td || td.dataset.ref === this.selected) return;
+    this.selected = td.dataset.ref;
+    this._highlightRange(this.anchor, this.selected);
+  }
+
+  _onMouseUp() {
+    if (!this._dragging) return;
+    this._dragging = false;
+    this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
   }
 
   _onCellDblClick(e) {
@@ -223,7 +274,7 @@ export class Grid {
 
   _onKeyDown(e) {
     if (this.editingInput || !this.selected) return;
-    if (!this.container.contains(document.activeElement) && document.activeElement !== document.body) return;
+    if (this._keyboardShouldDeferToOtherControl()) return;
 
     const moves = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     if (moves[e.key]) {
@@ -241,6 +292,17 @@ export class Grid {
           this._renderCell(ref);
         }
       }
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+      // The native 'copy' event (see _onCopy below) only fires when there's
+      // an actual browser text/DOM selection, which clicking a cell never
+      // creates here -- Ctrl+C otherwise silently does nothing. Handle it
+      // directly instead of relying on that event.
+      e.preventDefault();
+      this._copySelectionToClipboard();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      if (this.readOnly) return;
+      e.preventDefault();
+      this._pasteClipboardAtSelection();
     } else if (!this.readOnly && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
       this._beginEdit(this.selected);
       this.editingInput.input.value = '';
@@ -254,26 +316,21 @@ export class Grid {
     this._select(colLetter(col) + (row + 1), false);
   }
 
-  _onCopy(e) {
-    if (!this.selected || this.editingInput) return;
-    if (!this.container.contains(document.activeElement) && document.activeElement !== document.body) return;
+  // Tab-separated between columns, newline-separated between rows -- the
+  // de facto interchange format spreadsheet apps use for clipboard data,
+  // so this round-trips with pasting into/from a real spreadsheet app.
+  _selectionToTsv() {
     const refs = this._rangeRefs(this.anchor, this.selected);
     const rows = {};
     for (const ref of refs) {
       const { row } = this._parseRef(ref);
       (rows[row] = rows[row] || []).push((this.cells[ref] && this.cells[ref].value) || '');
     }
-    const tsv = Object.keys(rows).sort((a, b) => a - b).map((r) => rows[r].join('\t')).join('\n');
-    e.clipboardData.setData('text/plain', tsv);
-    e.preventDefault();
+    return Object.keys(rows).sort((a, b) => a - b).map((r) => rows[r].join('\t')).join('\n');
   }
 
-  _onPaste(e) {
-    if (this.readOnly || !this.selected || this.editingInput) return;
-    if (!this.container.contains(document.activeElement) && document.activeElement !== document.body) return;
-    const text = e.clipboardData.getData('text/plain');
+  _applyTsvAtSelection(text) {
     if (!text) return;
-    e.preventDefault();
     const startCell = this._parseRef(this.selected);
     const lines = text.replace(/\r/g, '').split('\n').filter((l, i, a) => !(i === a.length - 1 && l === ''));
     lines.forEach((line, r) => {
@@ -285,6 +342,55 @@ export class Grid {
         this._renderCell(ref);
       });
     });
+  }
+
+  // Ctrl/Cmd+C path (see _onKeyDown): writes to the real OS clipboard via
+  // the async Clipboard API when available (requires a secure context --
+  // true in production, not necessarily true under local http:// dev),
+  // and always to the in-app fallback so copy/paste still works within
+  // the app regardless.
+  _copySelectionToClipboard() {
+    if (!this.selected || this.editingInput) return;
+    const tsv = this._selectionToTsv();
+    this._internalClipboard = tsv;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(tsv).catch(() => {
+        /* OS clipboard unavailable/denied -- in-app fallback above still covers it */
+      });
+    }
+  }
+
+  _pasteClipboardAtSelection() {
+    if (!this.selected || this.editingInput) return;
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText()
+        .then((text) => this._applyTsvAtSelection(text || this._internalClipboard))
+        .catch(() => this._applyTsvAtSelection(this._internalClipboard));
+    } else {
+      this._applyTsvAtSelection(this._internalClipboard);
+    }
+  }
+
+  // Native copy/paste events: only fire given an actual browser
+  // text/DOM selection or focus in an editable element, which plain cell
+  // clicks never create -- so in practice these rarely trigger. Kept as a
+  // secondary path (e.g. a real text selection made some other way);
+  // Ctrl+C/V is handled directly in _onKeyDown, which is what actually
+  // works from a plain cell click.
+  _onCopy(e) {
+    if (!this.selected || this.editingInput) return;
+    if (this._keyboardShouldDeferToOtherControl()) return;
+    e.clipboardData.setData('text/plain', this._selectionToTsv());
+    e.preventDefault();
+  }
+
+  _onPaste(e) {
+    if (this.readOnly || !this.selected || this.editingInput) return;
+    if (this._keyboardShouldDeferToOtherControl()) return;
+    const text = e.clipboardData.getData('text/plain');
+    if (!text) return;
+    e.preventDefault();
+    this._applyTsvAtSelection(text);
   }
 
   applyFormatToSelection(format) {
