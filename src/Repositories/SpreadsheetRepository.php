@@ -20,17 +20,28 @@ final class SpreadsheetRepository
         return $row === false ? null : $this->cast($row);
     }
 
-    /** Spreadsheets owned by the user, or where the user has an explicit spreadsheet_access row. */
+    /**
+     * Spreadsheets owned by the user, or where the user has an explicit
+     * spreadsheet_access row.
+     *
+     * Uses two distinct placeholders for the same value on purpose: with
+     * PDO::ATTR_EMULATE_PREPARES => false (native prepares, see Db.php),
+     * MySQL's native protocol does not support reusing one named
+     * placeholder for multiple positions in a query -- binding the same
+     * name twice throws SQLSTATE[HY093] at execute() time, since one bound
+     * value can't fill two slots. This is a systemic risk, not a one-off:
+     * any query with a repeated :name is broken under this driver config.
+     */
     public function listForUser(int $userId): array
     {
         $stmt = Db::connection()->prepare(
             'SELECT DISTINCT s.id, s.owner_id, s.title, s.created_at, s.updated_at, s.deleted_at
              FROM spreadsheets s
-             LEFT JOIN spreadsheet_access a ON a.spreadsheet_id = s.id AND a.user_id = :user_id
-             WHERE s.deleted_at IS NULL AND (s.owner_id = :user_id OR a.id IS NOT NULL)
+             LEFT JOIN spreadsheet_access a ON a.spreadsheet_id = s.id AND a.user_id = :user_id1
+             WHERE s.deleted_at IS NULL AND (s.owner_id = :user_id2 OR a.id IS NOT NULL)
              ORDER BY s.updated_at DESC'
         );
-        $stmt->execute(['user_id' => $userId]);
+        $stmt->execute(['user_id1' => $userId, 'user_id2' => $userId]);
         return array_map($this->cast(...), $stmt->fetchAll());
     }
 
