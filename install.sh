@@ -76,5 +76,18 @@ if [ "$DRY_RUN" -eq 1 ]; then
 else
   echo "Installing Blanket from $SRC_DIR to $DEST_DIR"
   rsync "${RSYNC_ARGS[@]}" "$SRC_DIR"/ "$DEST_DIR"/
+  # Apache/mod_php run as www-data, which is not a member of the claude
+  # group -- files land here owned claude:claude, so without this www-data
+  # can't read anything (confirmed: .htaccess unreadable -> Apache 403s
+  # everything "to be safe"). This app is meant to be publicly served, so
+  # world-readable app code is normal; secrets (.mysql.env/.app.env) are
+  # never synced by this script in the first place, deliberately, and need
+  # their own permission handling (see deploy/README.md).
+  # -mindepth 1: the deploy root itself is owned by www-data (already
+  # readable/traversable by it as owner) and not by claude, so chmod'ing
+  # it directly fails with "Operation not permitted" -- only its contents,
+  # which claude actually owns, need this.
+  find "$DEST_DIR" -mindepth 1 -type d -exec chmod o+rx {} +
+  find "$DEST_DIR" -mindepth 1 -type f -exec chmod o+r {} +
   echo "Done."
 fi

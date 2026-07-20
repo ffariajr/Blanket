@@ -4,6 +4,14 @@
 # directly.
 RewriteEngine On
 
+# Apache/mod_php does not forward the Authorization header to PHP by
+# default (a long-standing gotcha, not specific to this app) -- without
+# this, every JWT bearer-token request looks unauthenticated to
+# Request::bearerToken(), even though login itself works fine. Capture it
+# into an env var PHP can read via getallheaders()/$_SERVER.
+RewriteCond %{HTTP:Authorization} ^(.+)$
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
 RewriteRule ^(src|bin|vendor|db|ws-server)(/|$) - [F,L]
 
 RewriteRule ^dev-router\.php$ - [F,L]
