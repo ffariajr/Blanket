@@ -693,6 +693,24 @@ export class Grid {
     const rowTh = e.target.closest('tbody th');
     const colTh = e.target.closest('thead th');
     if (!cellTd && !rowTh && !colTh) return;
+
+    // One-shot escape hatch to the native browser menu (Fernando: "show an
+    // option to show the normal browser right click menu"). Once
+    // preventDefault() has been called on a contextmenu event there's no
+    // way to un-suppress the native menu for that click -- browsers also
+    // don't let scripts summon it on demand -- so this can only work by
+    // arming a flag (see allowNativeContextMenuOnce()) that skips
+    // preventDefault()/the custom menu for the *next* right-click instead.
+    // Same pattern Google Docs/Sheets and VS Code web use for this. Always
+    // consumed here regardless of outcome, so it can never stay armed past
+    // one right-click (a timer in allowNativeContextMenuOnce() is the
+    // backstop for "never right-clicks again").
+    if (this._allowNativeContextMenuOnce) {
+      this._allowNativeContextMenuOnce = false;
+      clearTimeout(this._allowNativeContextMenuTimer);
+      return;
+    }
+
     e.preventDefault();
 
     let detail;
@@ -713,6 +731,22 @@ export class Grid {
       detail = { kind: 'col-header', colIndex, x: e.clientX, y: e.clientY };
     }
     this.container.dispatchEvent(new CustomEvent('gridcontextmenu', { detail }));
+  }
+
+  /**
+   * Arms the one-shot native-context-menu pass-through consumed by
+   * _onContextMenu above. A 4s timer is the backstop for "user never
+   * right-clicks again" (e.g. they left-click elsewhere, or just walk
+   * away) -- without it the flag could sit armed indefinitely and
+   * surprise them by silently swallowing a custom menu much later. Safe
+   * to call again while already armed (just re-arms the timer).
+   */
+  allowNativeContextMenuOnce() {
+    this._allowNativeContextMenuOnce = true;
+    clearTimeout(this._allowNativeContextMenuTimer);
+    this._allowNativeContextMenuTimer = setTimeout(() => {
+      this._allowNativeContextMenuOnce = false;
+    }, 4000);
   }
 
   /**

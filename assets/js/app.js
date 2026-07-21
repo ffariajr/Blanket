@@ -791,6 +791,36 @@ function showContextMenuAt(x, y, items) {
   }, 0);
 }
 
+/**
+ * Brief toast near (x,y), auto-removing -- same lightweight
+ * transient-feedback idea as the Copy Link button's "Copied!" text swap,
+ * but as a standalone element rather than reverting an existing button's
+ * text, since there's no persistent button here to revert.
+ */
+function showTransientHint(text, x, y) {
+  const hint = el('div', { class: 'context-hint' }, text);
+  document.body.appendChild(hint);
+  hint.style.left = `${Math.min(x, window.innerWidth - hint.offsetWidth - 8) + window.scrollX}px`;
+  hint.style.top = `${Math.min(y + 8, window.innerHeight - hint.offsetHeight - 8) + window.scrollY}px`;
+  setTimeout(() => hint.remove(), 2500);
+}
+
+/**
+ * "Show browser menu" escape hatch appended to both context menus below
+ * (Fernando: "show an option to show the normal browser right click
+ * menu"). Arms Grid's one-shot native-menu pass-through and hints that a
+ * second right-click is what actually triggers it -- there's no way to
+ * summon the native menu immediately on click (browsers don't allow
+ * scripts to trigger it on demand, and preventDefault() on the original
+ * right-click can't be undone after the fact).
+ */
+function nativeMenuEscapeItem(grid, x, y) {
+  return ['Show browser menu', () => {
+    grid.allowNativeContextMenuOnce();
+    showTransientHint('Right-click again for the browser menu', x, y);
+  }];
+}
+
 /** Right-click on a cell/selection: Cut, Copy, Paste, Clear contents -- the "common menu options" Fernando asked for. Reuses the exact same Ctrl+C/V/Delete logic, not a parallel implementation. */
 function showCellContextMenu(x, y, grid) {
   const items = [
@@ -803,6 +833,7 @@ function showCellContextMenu(x, y, grid) {
       ['Clear contents', () => grid._clearSelection()],
     );
   }
+  items.push(nativeMenuEscapeItem(grid, x, y));
   showContextMenuAt(x, y, items);
 }
 
@@ -833,6 +864,7 @@ function showHeaderContextMenu(x, y, grid, kind, index) {
     [`Insert ${count} column${count > 1 ? 's' : ''} right`, () => grid.insertColumnsAt(end + 1, count)],
     [`Delete column${count > 1 ? 's' : ''}`, () => grid.deleteColumnsAt(start, count)],
   ];
+  items.push(nativeMenuEscapeItem(grid, x, y));
   showContextMenuAt(x, y, items);
 }
 

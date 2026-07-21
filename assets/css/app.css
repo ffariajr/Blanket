@@ -366,6 +366,21 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   color: var(--color-text);
 }
 .tab-menu-item:hover { background: var(--color-bg); }
+
+/* Transient toast for the context menu's "Show browser menu" hint
+   ("Right-click again for the browser menu") -- not interactive, just a
+   brief pointer near the cursor, auto-removed by showTransientHint(). */
+.context-hint {
+  position: absolute;
+  z-index: 10;
+  background: var(--color-text);
+  color: var(--color-surface);
+  font-size: var(--font-size-xs);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-modal);
+  pointer-events: none;
+}
 /* .file-btn (already applied alongside .tab-menu-item on the Import CSV
    item) already provides the position/overflow/hidden-input handling. */
 
