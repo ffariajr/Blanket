@@ -32,6 +32,17 @@ function isLoggedIn() {
   return !!getToken();
 }
 
+function formatRelativeTime(date) {
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (seconds < 10) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 // --- Router -----------------------------------------------------------
 
 function parseHash() {
@@ -209,15 +220,29 @@ async function renderSheet(spreadsheetId, tabId) {
   const sheetUrl = (tid) => (spreadsheet && spreadsheet.guid)
     ? `#/s/${spreadsheet.guid}/t/${tid}`
     : `#/sheets/${spreadsheetId}/tabs/${tid}`;
-  const tabsListUrl = (spreadsheet && spreadsheet.guid) ? `#/s/${spreadsheet.guid}` : `#/sheets/${spreadsheetId}`;
 
   const readOnly = false; // grid itself doesn't know permissions; server rejects unauthorized writes either way
   const cells = (current.data && current.data.cells) || {};
+  const currentTab = tabsRes.tabs.find((t) => t.id === tabId) || null;
+  const reload = () => renderSheet(spreadsheetId, tabId);
 
   const me = getCurrentUser();
   const canManageAccess = !!spreadsheet && !!me && (me.isAdmin || spreadsheet.owner_id === me.id);
 
-  const statusEl = el('span', { class: 'ws-status' }, 'connecting…');
+  // --- Status area: connection state and last-saved time are two
+  // separate small facts, not one ambiguous word ("what is the
+  // disconnected word top right?"). Both auto-save paths (WS server-side
+  // debounce, and the REST fallback below) already save without a manual
+  // trigger -- this just surfaces when that last happened.
+  const connectionEl = el('span', { class: 'status-dot status-connecting' }, 'Connecting…');
+  const savedEl = el('span', { class: 'status-saved' }, '');
+  let lastSavedAt = current.created_at ? new Date(current.created_at.replace(' ', 'T') + 'Z') : null;
+  function renderSavedLabel() {
+    savedEl.textContent = lastSavedAt ? `Saved ${formatRelativeTime(lastSavedAt)}` : '';
+  }
+  renderSavedLabel();
+  const savedTick = setInterval(renderSavedLabel, 20000);
+
   const gridContainer = el('div', { class: 'grid-container' });
   const grid = new Grid(gridContainer, {
     cells,
@@ -237,9 +262,20 @@ async function renderSheet(spreadsheetId, tabId) {
     }, t.name));
   });
 
+  const tabMenuBtn = el('button', { class: 'btn btn-secondary btn-icon', title: 'Tab options' }, '⋮');
+  tabMenuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showTabMenu(tabMenuBtn, {
+      tabId,
+      tabName: currentTab ? currentTab.name : 'Tab',
+      grid,
+      onRenamed: reload,
+    });
+  });
+
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { class: 'btn btn-icon', onclick: () => grid.applyFormatToSelection({ bold: true }) }, 'B'),
-    el('button', { class: 'btn btn-icon', onclick: () => grid.applyFormatToSelection({ italic: true }) }, 'I'),
+    el('button', { class: 'btn btn-icon', title: 'Bold', onclick: () => grid.applyFormatToSelection({ bold: true }) }, 'B'),
+    el('button', { class: 'btn btn-icon', title: 'Italic', onclick: () => grid.applyFormatToSelection({ italic: true }) }, 'I'),
     el('input', {
       class: 'btn-color', type: 'color', title: 'Text color',
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
@@ -248,22 +284,23 @@ async function renderSheet(spreadsheetId, tabId) {
       class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff',
       onchange: (e) => grid.applyFormatToSelection({ bg: e.target.value }),
     }),
-    el('button', { class: 'btn', onclick: () => socket.requestSave() }, 'Save now'),
-    el('button', { class: 'btn', onclick: () => showHistory(tabId, grid) }, 'History'),
-    canManageAccess ? el('button', { class: 'btn', onclick: () => showShare(spreadsheetId) }, 'Share') : null,
-    el('button', { class: 'btn', onclick: () => exportCsv(tabId) }, 'Export CSV'),
-    el('label', { class: 'btn file-btn' }, [
-      'Import CSV',
-      el('input', { type: 'file', accept: '.csv', onchange: (e) => importCsv(tabId, e, grid) }),
-    ]),
+    el('div', { class: 'toolbar-spacer' }),
+    tabMenuBtn,
+  ]);
+
+  const actions = el('div', { class: 'sheet-actions' }, [
+    el('button', { class: 'btn btn-secondary btn-small', onclick: () => showRenameSpreadsheet(spreadsheet, reload) }, 'Rename'),
+    el('button', { class: 'btn btn-secondary btn-small', onclick: () => showManageTabs(spreadsheetId, tabId, reload) }, 'Manage tabs'),
+    canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showShare(spreadsheetId) }, 'Share') : null,
+    el('a', { href: '#/sheets', class: 'btn btn-secondary btn-small' }, 'Exit'),
   ]);
 
   mount(el('div', { class: 'page sheet-page' }, [
     el('header', { class: 'topbar' }, [
-      el('a', { href: tabsListUrl, class: 'link' }, '← Tabs'),
       el('h1', {}, (spreadsheet && spreadsheet.title) || 'Spreadsheet'),
-      statusEl,
+      actions,
     ]),
+    el('div', { class: 'status-row' }, [connectionEl, savedEl]),
     tabNav,
     toolbar,
     gridContainer,
@@ -272,7 +309,9 @@ async function renderSheet(spreadsheetId, tabId) {
   // --- REST fallback autosave, so editing still works if the socket
   // never connects (e.g. before the proxy is wired up) or drops. Debounced
   // the same way the WS path is (see EDIT_DEBOUNCE_MS in ws.js), just
-  // routed to POST /api/tabs/{id}/save instead of a WS message.
+  // routed to POST /api/tabs/{id}/save instead of a WS message. This was
+  // already auto-saving before -- the removed "Save now" button was only
+  // ever a manual force-flush, not a requirement to save at all.
   let saveTimer = null;
   function localSaveFallbackTimer() {
     if (socket.isConnected()) return; // socket path handles persistence
@@ -281,7 +320,8 @@ async function renderSheet(spreadsheetId, tabId) {
       saveTimer = null;
       try {
         await api.saveTabState(tabId, { cells: grid.cells }, getDisplayName());
-        statusEl.textContent = 'saved (offline mode)';
+        lastSavedAt = new Date();
+        renderSavedLabel();
       } catch {
         /* best-effort; next edit will retry */
       }
@@ -297,11 +337,16 @@ async function renderSheet(spreadsheetId, tabId) {
       /* could show a "someone is typing" indicator; kept minimal */
     },
     onSaved: () => {
-      statusEl.textContent = 'saved';
-      setTimeout(() => { statusEl.textContent = socket.isConnected() ? 'live' : 'offline'; }, 1500);
+      lastSavedAt = new Date();
+      renderSavedLabel();
     },
     onStatus: (status) => {
-      statusEl.textContent = status === 'connected' ? 'live' : status === 'unavailable' ? 'offline (saving disabled)' : status;
+      // "unavailable" and "disconnected" both mean the REST fallback is
+      // doing the saving instead -- editing still works either way, so
+      // this is never "saving disabled", just "not live right now".
+      const live = status === 'connected';
+      connectionEl.className = 'status-dot ' + (live ? 'status-live' : status === 'connecting' ? 'status-connecting' : 'status-offline');
+      connectionEl.textContent = live ? 'Live' : status === 'connecting' ? 'Connecting…' : 'Offline';
     },
   });
   socket.connect();
@@ -310,7 +355,10 @@ async function renderSheet(spreadsheetId, tabId) {
     socket.sendKeystroke({ at: Date.now() });
   });
 
-  currentTeardown = () => socket.close();
+  currentTeardown = () => {
+    clearInterval(savedTick);
+    socket.close();
+  };
 }
 
 async function showHistory(tabId, grid) {
@@ -422,6 +470,186 @@ async function showShare(spreadsheetId) {
   const dialog = el('div', { class: 'modal' }, [
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'Share'),
+      error,
+      body,
+      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
+    ]),
+  ]);
+  document.body.appendChild(dialog);
+  await refresh();
+}
+
+// Small floating dropdown for the currently-viewed tab's quick actions.
+// Deliberately separate from showManageTabs below: this is "things you do
+// to the tab you're looking at" (Fernando: "in the tab menu, I want import
+// and export buttons, history, rename tab"), that's "manage every tab in
+// this spreadsheet" (create/reorder/delete any of them).
+function showTabMenu(anchorEl, { tabId, tabName, grid, onRenamed }) {
+  document.querySelectorAll('.tab-menu').forEach((n) => n.remove());
+
+  const menu = el('div', { class: 'tab-menu' }, [
+    el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); exportCsv(tabId); } }, 'Export CSV'),
+    el('label', { class: 'tab-menu-item file-btn' }, [
+      'Import CSV',
+      el('input', {
+        type: 'file', accept: '.csv',
+        onchange: (e) => { close(); importCsv(tabId, e, grid); },
+      }),
+    ]),
+    el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); showHistory(tabId, grid); } }, 'History'),
+    el('button', {
+      class: 'tab-menu-item', type: 'button',
+      onclick: async () => {
+        close();
+        const name = window.prompt('Rename tab', tabName);
+        if (name && name.trim() && name.trim() !== tabName) {
+          await api.renameTab(tabId, name.trim());
+          onRenamed();
+        }
+      },
+    }, 'Rename tab'),
+  ]);
+
+  document.body.appendChild(menu);
+  const rect = anchorEl.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  menu.style.left = `${Math.max(8, rect.right + window.scrollX - menu.offsetWidth)}px`;
+
+  function close() {
+    menu.remove();
+    document.removeEventListener('click', onDocClick);
+  }
+  function onDocClick(e) {
+    if (!menu.contains(e.target) && e.target !== anchorEl) close();
+  }
+  setTimeout(() => document.addEventListener('click', onDocClick), 0);
+}
+
+function showRenameSpreadsheet(spreadsheet, onDone) {
+  const input = el('input', { type: 'text', value: (spreadsheet && spreadsheet.title) || '' });
+  const error = el('p', { class: 'error hidden' });
+
+  const dialog = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-content' }, [
+      el('h2', {}, 'Rename spreadsheet'),
+      error,
+      el('form', {
+        class: 'inline-form',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          const title = input.value.trim();
+          if (!title || !spreadsheet) return;
+          try {
+            await api.renameSpreadsheet(spreadsheet.id, title);
+            dialog.remove();
+            onDone();
+          } catch {
+            error.textContent = 'Could not rename (you may not have permission).';
+            error.classList.remove('hidden');
+          }
+        },
+      }, [input, el('button', { class: 'btn', type: 'submit' }, 'Save')]),
+      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
+    ]),
+  ]);
+  document.body.appendChild(dialog);
+  input.focus();
+  input.select();
+}
+
+// Full tab management: create, reorder (swaps the two tabs' `position`
+// values -- TabRepository.reorder() just sets the raw column, it doesn't
+// shift neighbors, so a single-sided update would leave two tabs sharing
+// a position), rename, delete. Reachable via the "Manage tabs" button next
+// to the spreadsheet title, not just the per-tab quick menu above.
+async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
+  const body = el('div', {});
+  const error = el('p', { class: 'error hidden' });
+
+  async function refresh() {
+    body.textContent = '';
+    error.classList.add('hidden');
+    const { tabs } = await api.listTabs(spreadsheetId);
+
+    const list = el('ul', { class: 'manage-tabs-list' });
+    tabs.forEach((t, i) => {
+      const prev = tabs[i - 1];
+      const next = tabs[i + 1];
+      list.appendChild(el('li', {}, [
+        el('span', { class: t.id === currentTabId ? 'manage-tabs-current' : '' }, t.name),
+        el('span', { class: 'manage-tabs-controls' }, [
+          el('button', {
+            class: 'btn btn-small btn-secondary', title: 'Move left',
+            disabled: !prev || null,
+            onclick: async () => {
+              if (!prev) return;
+              await Promise.all([api.reorderTab(t.id, prev.position), api.reorderTab(prev.id, t.position)]);
+              await refresh();
+              onChanged();
+            },
+          }, '←'),
+          el('button', {
+            class: 'btn btn-small btn-secondary', title: 'Move right',
+            disabled: !next || null,
+            onclick: async () => {
+              if (!next) return;
+              await Promise.all([api.reorderTab(t.id, next.position), api.reorderTab(next.id, t.position)]);
+              await refresh();
+              onChanged();
+            },
+          }, '→'),
+          el('button', {
+            class: 'btn btn-small btn-secondary',
+            onclick: async () => {
+              const name = window.prompt('Rename tab', t.name);
+              if (name && name.trim() && name.trim() !== t.name) {
+                await api.renameTab(t.id, name.trim());
+                await refresh();
+                onChanged();
+              }
+            },
+          }, 'Rename'),
+          tabs.length > 1 ? el('button', {
+            class: 'btn btn-small btn-danger',
+            onclick: async () => {
+              if (!window.confirm(`Delete tab "${t.name}"? This cannot be undone from here.`)) return;
+              try {
+                await api.deleteTab(t.id, getDisplayName());
+                await refresh();
+                onChanged();
+              } catch {
+                error.textContent = 'Could not delete tab (you may not have permission).';
+                error.classList.remove('hidden');
+              }
+            },
+          }, 'Delete') : null,
+        ]),
+      ]));
+    });
+    body.appendChild(list);
+
+    const newName = el('input', { type: 'text', placeholder: 'New tab name' });
+    body.appendChild(el('form', {
+      class: 'inline-form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        if (!newName.value.trim()) return;
+        try {
+          await api.createTab(spreadsheetId, newName.value.trim(), getDisplayName());
+          newName.value = '';
+          await refresh();
+          onChanged();
+        } catch {
+          error.textContent = 'Could not create tab (you may not have permission).';
+          error.classList.remove('hidden');
+        }
+      },
+    }, [newName, el('button', { class: 'btn', type: 'submit' }, 'Add tab')]));
+  }
+
+  const dialog = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-content' }, [
+      el('h2', {}, 'Manage tabs'),
       error,
       body,
       el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),

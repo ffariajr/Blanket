@@ -180,18 +180,43 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   gap: var(--space-4);
   padding: var(--space-3) 0;
   border-bottom: 1px solid var(--color-border);
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-2);
   flex-wrap: wrap;
 }
-.topbar h1 { margin: 0; flex: 1; }
+.topbar h1 { margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.ws-status {
+.sheet-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+
+/* Small, separate facts, not one ambiguous word: is the live socket up,
+   and when did this last actually save. Both auto-save paths (WS
+   server-side debounce, REST fallback) already save without a manual
+   trigger -- there is no "Save now" button anymore. */
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
+}
+.status-dot::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-border-strong);
+}
+.status-dot.status-live::before { background: #16a34a; }
+.status-dot.status-offline::before { background: var(--color-text-muted); }
+.status-dot.status-connecting::before { background: #d97706; }
+.status-saved {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
 }
 
 .inline-form { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); }
@@ -250,6 +275,52 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   flex-wrap: wrap;
   align-items: center;
 }
+.toolbar-spacer { flex: 1; }
+
+/* Floating quick-actions menu for the currently-viewed tab (Export/Import
+   CSV, History, Rename) -- positioned in JS relative to its anchor button. */
+.tab-menu {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-modal);
+  padding: var(--space-1);
+}
+.tab-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--color-text);
+}
+.tab-menu-item:hover { background: var(--color-bg); }
+/* .file-btn (already applied alongside .tab-menu-item on the Import CSV
+   item) already provides the position/overflow/hidden-input handling. */
+
+.manage-tabs-list { margin-bottom: var(--space-3); }
+.manage-tabs-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+.manage-tabs-list li:last-child { border-bottom: none; }
+.manage-tabs-current { font-weight: 600; color: var(--color-accent); }
+.manage-tabs-controls { display: flex; gap: var(--space-1); flex-shrink: 0; }
 
 /* --- Grid --------------------------------------------------------- */
 
