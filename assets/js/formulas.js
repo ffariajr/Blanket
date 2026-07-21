@@ -447,6 +447,86 @@ export function shiftFormulaReferences(formula, deltaCols, deltaRows) {
   return refError ? '=#REF!' : '=' + out;
 }
 
+/**
+ * Reference adjustment for inserting/deleting rows or columns -- a
+ * different transform than shiftFormulaReferences() above (copy/paste):
+ * that one shifts every reference in ONE formula by a uniform delta
+ * because the CELL ITSELF moved. This one is applied to EVERY formula in
+ * the whole document (a cell whose own position never changed can still
+ * reference something that did), and '$' locking is irrelevant here --
+ * $ only matters for "does this reference move when the formula itself is
+ * copied elsewhere," not "does this reference move when some other row/
+ * column is structurally inserted or removed." A locked and unlocked
+ * reference to the same cell shift identically; '$' characters are kept
+ * in the output as literal text, just never consulted for the shift
+ * decision.
+ *
+ * insert: every reference at/after boundaryIndex (in `dimension`) shifts
+ * by +count.
+ * delete: every reference inside [boundaryIndex, boundaryIndex+count)
+ * invalidates the whole formula to `=#REF!` (matching Excel -- a formula
+ * referencing a row/column that no longer exists is wholly invalid);
+ * every reference at/after boundaryIndex+count shifts by -count;
+ * anything before boundaryIndex is untouched.
+ *
+ * Deliberately not attempting full dependency-graph correctness (e.g. a
+ * RANGE whose start and end land on opposite sides of a delete boundary
+ * collapsing sensibly) -- this is a best-effort pass, not a spreadsheet-
+ * engine-grade implementation. Get the common cases right; edge cases
+ * fall back to #REF! rather than silently computing something wrong.
+ *
+ * @param {string} formula
+ * @param {'row'|'col'} dimension
+ * @param {number} boundaryIndex 0-indexed row/col where the change starts
+ * @param {number} count how many rows/cols were inserted or removed
+ * @param {boolean} isInsert
+ * @returns {string} unchanged if `formula` isn't a formula
+ */
+export function shiftReferencesForStructuralChange(formula, dimension, boundaryIndex, count, isInsert) {
+  if (!isFormula(formula)) return formula;
+  const body = formula.slice(1);
+  let out = '';
+  let i = 0;
+  let refError = false;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"') {
+      const end = body.indexOf('"', i + 1);
+      const stop = end === -1 ? body.length : end + 1;
+      out += body.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    const rest = body.slice(i);
+    const m = rest.match(/^(\$?)([A-Z]+)(\$?)(\d+)/i);
+    if (m) {
+      const [full, colDollar, letters, rowDollar, digits] = m;
+      const { col, row } = parseRef(letters.toUpperCase() + digits);
+      const idx = dimension === 'row' ? row : col;
+      let newIdx = idx;
+      if (isInsert) {
+        if (idx >= boundaryIndex) newIdx = idx + count;
+      } else if (idx >= boundaryIndex && idx < boundaryIndex + count) {
+        refError = true;
+      } else if (idx >= boundaryIndex + count) {
+        newIdx = idx - count;
+      }
+      if (refError) {
+        out += full; // whole formula becomes #REF! below regardless of this text
+      } else {
+        const newRow = dimension === 'row' ? newIdx : row;
+        const newCol = dimension === 'col' ? newIdx : col;
+        out += `${colDollar}${colLetter(newCol)}${rowDollar}${newRow + 1}`;
+      }
+      i += full.length;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return refError ? '=#REF!' : '=' + out;
+}
+
 export function expandRange(startRef, endRef) {
   const a = parseRef(startRef);
   const b = parseRef(endRef);

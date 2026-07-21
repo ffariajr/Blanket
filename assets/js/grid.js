@@ -1,24 +1,40 @@
-// Grid rendering + editing. Fixed-size viewport grid (cols A..AD, 100
-// rows) -- generous for a small church spreadsheet app without needing
-// virtualized/infinite scroll. Sparse cell data: {"A1": {value, format, merge}}.
-import { isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo, shiftFormulaReferences } from './formulas.js';
+// Grid rendering + editing. Per-tab, resizable dimensions (this.cols/
+// this.rows -- see CELL_SCHEMA.md "cols/rows"), not a fixed global canvas
+// -- a new tab defaults to 6 cols (A-F) x 20 rows (set server-side, see
+// TabController::DEFAULT_COLS/DEFAULT_ROWS) and grows/shrinks via
+// insertRowsAt/deleteRowsAt/insertColumnsAt/deleteColumnsAt below.
+// Sparse cell data: {"A1": {value, format, merge}}.
+import {
+  isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo,
+  shiftFormulaReferences, shiftReferencesForStructuralChange,
+} from './formulas.js';
 import { getUserInfoField, setUserInfoField } from './api.js';
 
-const COLS = 30; // A..AD
-const ROWS = 100;
+// Fallback for a document saved before per-tab dimensions existed (no
+// `cols`/`rows` keys at all) -- the old fixed size, so pre-existing data
+// doesn't lose visibility into cells beyond the new 6x20 default. Every
+// NEW tab always has explicit cols/rows from creation on (see
+// TabController::create()), so this only ever matters for old data.
+const LEGACY_COLS = 30; // A..AD
+const LEGACY_ROWS = 100;
 const DEFAULT_COL_WIDTH = 96;
 const DEFAULT_ROW_HEIGHT = 28;
 const MIN_COL_WIDTH = 32;
 const MIN_ROW_HEIGHT = 18;
+const MIN_COLS = 1;
+const MIN_ROWS = 1;
 
 export { colLetter };
 
 export class Grid {
   /**
    * @param {HTMLElement} container
-   * @param {object} opts.document {cells, columnWidths, rowHeights} -- the
-   *   full tab document shape (see CELL_SCHEMA.md). columnWidths/
-   *   rowHeights are sparse (col letter / row number -> px override).
+   * @param {object} opts.document {cells, columnWidths, rowHeights, cols,
+   *   rows} -- the full tab document shape (see CELL_SCHEMA.md).
+   *   columnWidths/rowHeights are sparse (col letter / row number -> px
+   *   override). cols/rows are the grid's actual dimensions -- falls back
+   *   to LEGACY_COLS/LEGACY_ROWS if absent (a document saved before this
+   *   feature existed).
    * @param {(patch: object) => void} opts.onChange called with a
    *   full-document-shaped merge patch (e.g. {cells: {...}} or
    *   {columnWidths: {...}}) on any local edit -- this is the wire shape
@@ -32,12 +48,17 @@ export class Grid {
     this.cells = doc.cells || {};
     this.columnWidths = doc.columnWidths || {};
     this.rowHeights = doc.rowHeights || {};
+    this.cols = doc.cols || LEGACY_COLS;
+    this.rows = doc.rows || LEGACY_ROWS;
     this.onChange = onChange || (() => {});
     this.readOnly = !!readOnly;
     this.selected = null; // ref string
     this.anchor = null; // for range selection
     this.editingInput = null;
     this._dragging = false;
+    this._headerDragging = null; // 'row'|'col'|null -- see _onRowHeaderMouseDown/_onColHeaderMouseDown
+    this._headerAnchorRow = null; // anchor row/col for a whole-row/column selection -- see selectWholeRow/Column
+    this._headerAnchorCol = null;
     this._resizing = null; // {kind: 'col'|'row', key, startPx, startSize, el}
     this.onSelectionChange = null; // set by app.js: (ref) => void, for the formula bar
     // In-app clipboard fallback for when the OS Clipboard API is
@@ -59,6 +80,14 @@ export class Grid {
     document.addEventListener('copy', (e) => this._onCopy(e));
     document.addEventListener('mousemove', (e) => this._onResizeMove(e));
     document.addEventListener('mouseup', () => this._onResizeEnd());
+    // Bound once on the container (which persists across _build() rebuilds,
+    // unlike this.table) -- contextmenu on a cell or a row/col header opens
+    // a custom menu instead of the browser's native one. app.js listens for
+    // the 'gridcontextmenu' CustomEvent this dispatches to actually render
+    // the menu (grid.js has no dialog/menu-positioning machinery of its
+    // own, same division of responsibility as mergeSelection()'s {ok,error}
+    // return -- grid.js does the data operation, app.js does the UI).
+    this.container.addEventListener('contextmenu', (e) => this._onContextMenu(e));
     this._build();
   }
 
@@ -70,6 +99,8 @@ export class Grid {
     this.cells = doc.cells || {};
     this.columnWidths = doc.columnWidths || {};
     this.rowHeights = doc.rowHeights || {};
+    this.cols = doc.cols || LEGACY_COLS;
+    this.rows = doc.rows || LEGACY_ROWS;
     this._build();
   }
 
@@ -108,6 +139,18 @@ export class Grid {
       }
       this._applyRowHeights();
     }
+    // A remote insert/delete row/column changes the grid's own dimensions
+    // -- always a structural rebuild (the whole table layout depends on
+    // cols/rows, not something _applyColumnWidths/_applyRowHeights's
+    // narrower per-element updates can express).
+    if (typeof patch.cols === 'number' && patch.cols !== this.cols) {
+      this.cols = patch.cols;
+      structural = true;
+    }
+    if (typeof patch.rows === 'number' && patch.rows !== this.rows) {
+      this.rows = patch.rows;
+      structural = true;
+    }
     if (structural) this._build();
   }
 
@@ -130,9 +173,10 @@ export class Grid {
     // every mousemove (that was the old behavior; see _applyColumnWidths'
     // doc comment for why it was a real perf/flicker bug, not just slow).
     this._colElements = [];
+    this._colHeaderElements = [];
     const colgroup = document.createElement('colgroup');
     colgroup.appendChild(document.createElement('col')); // row-header column
-    for (let c = 0; c < COLS; c++) {
+    for (let c = 0; c < this.cols; c++) {
       const col = document.createElement('col');
       col.style.width = (this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH) + 'px';
       colgroup.appendChild(col);
@@ -144,12 +188,18 @@ export class Grid {
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
     headRow.appendChild(document.createElement('th'));
-    for (let c = 0; c < COLS; c++) {
+    for (let c = 0; c < this.cols; c++) {
       const letter = colLetter(c);
       const th = document.createElement('th');
       th.textContent = letter;
+      th.dataset.colIndex = String(c);
+      // mousedown (not click) so drag-across-headers can extend a
+      // multi-column selection the same way cell drag-select works --
+      // see _onColHeaderMouseDown/_onMouseMoveDrag.
+      th.addEventListener('mousedown', (e) => this._onColHeaderMouseDown(e, c));
       th.appendChild(this._colResizeHandle(letter, this._colElements[c]));
       headRow.appendChild(th);
+      this._colHeaderElements.push(th);
     }
     thead.appendChild(headRow);
     table.appendChild(thead);
@@ -166,8 +216,9 @@ export class Grid {
     this._cellElements = new Map();
 
     this._rowElements = [];
+    this._rowHeaderElements = [];
     const tbody = document.createElement('tbody');
-    for (let r = 0; r < ROWS; r++) {
+    for (let r = 0; r < this.rows; r++) {
       const rowNum = r + 1;
       const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
       const tr = document.createElement('tr');
@@ -175,6 +226,9 @@ export class Grid {
       this._rowElements.push(tr);
       const rowHead = document.createElement('th');
       rowHead.textContent = String(rowNum);
+      rowHead.dataset.rowIndex = String(r);
+      rowHead.addEventListener('mousedown', (e) => this._onRowHeaderMouseDown(e, r));
+      this._rowHeaderElements.push(rowHead);
       rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
       // A <tr height> is only a floor in table layout -- content taller
       // than it (e.g. a large font-size, see .toolbar's font-size
@@ -192,7 +246,7 @@ export class Grid {
       rowHead.style.height = rowHeight + 'px';
       rowHead.style.overflow = 'hidden';
       tr.appendChild(rowHead);
-      for (let c = 0; c < COLS; c++) {
+      for (let c = 0; c < this.cols; c++) {
         const ref = colLetter(c) + rowNum;
         if (this._coverage.has(ref)) continue; // reserved by an earlier cell's colspan/rowspan
         const td = document.createElement('td');
@@ -363,7 +417,7 @@ export class Grid {
    */
   _applyColumnWidths() {
     if (!this._colElements) return;
-    for (let c = 0; c < COLS; c++) {
+    for (let c = 0; c < this.cols; c++) {
       const width = this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
       if (this._colElements[c]) this._colElements[c].style.width = width + 'px';
     }
@@ -372,7 +426,7 @@ export class Grid {
 
   _sumColumnWidths() {
     let total = 0;
-    for (let c = 0; c < COLS; c++) total += this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
+    for (let c = 0; c < this.cols; c++) total += this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
     return total;
   }
 
@@ -393,7 +447,7 @@ export class Grid {
   /** Row-height counterpart of _applyColumnWidths -- same reasoning, see its doc comment. */
   _applyRowHeights() {
     if (!this._rowElements) return;
-    for (let r = 0; r < ROWS; r++) {
+    for (let r = 0; r < this.rows; r++) {
       const rowNum = r + 1;
       const height = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
       const tr = this._rowElements[r];
@@ -440,8 +494,8 @@ export class Grid {
   }
 
   _renderAll() {
-    for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
         const ref = colLetter(c) + (r + 1);
         if (!this._isCovered(ref)) this._renderCell(ref);
       }
@@ -578,6 +632,21 @@ export class Grid {
   }
 
   _onMouseMoveDrag(e) {
+    // Dragging across row/col headers (started by _onRowHeaderMouseDown/
+    // _onColHeaderMouseDown below) extends a whole-row/whole-column
+    // selection instead of the plain cell-range drag below -- same
+    // mousemove listener, different branch, since both need "which header
+    // is the pointer over right now" from the same event.
+    if (this._headerDragging === 'row') {
+      const th = e.target.closest('tbody th');
+      if (th && th.dataset.rowIndex !== undefined) this.selectWholeRow(Number(th.dataset.rowIndex), true);
+      return;
+    }
+    if (this._headerDragging === 'col') {
+      const th = e.target.closest('thead th');
+      if (th && th.dataset.colIndex !== undefined) this.selectWholeColumn(Number(th.dataset.colIndex), true);
+      return;
+    }
     if (!this._dragging) return;
     const td = e.target.closest('td');
     if (!td || td.dataset.ref === this.selected) return;
@@ -586,6 +655,11 @@ export class Grid {
   }
 
   _onMouseUp() {
+    if (this._headerDragging) {
+      this._headerDragging = null;
+      this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
+      return;
+    }
     if (!this._dragging) return;
     this._dragging = false;
     this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
@@ -595,6 +669,129 @@ export class Grid {
     const td = e.target.closest('td');
     if (!td || this.readOnly) return;
     this._beginEdit(td.dataset.ref);
+  }
+
+  /**
+   * Right-click on a cell or a row/col header: suppress the browser's
+   * native menu and dispatch a 'gridcontextmenu' CustomEvent instead --
+   * app.js listens for it and renders the actual menu (positioning,
+   * dismiss-on-click-outside, the menu items themselves all live there,
+   * consistent with how mergeSelection()/unmergeSelection() return
+   * {ok,error} for app.js to surface rather than grid.js owning any
+   * dialog/toast UI itself).
+   *
+   * Right-clicking a cell/header OUTSIDE the current selection replaces
+   * the selection with just that one cell/row/column first (matching
+   * Excel/Sheets) -- right-clicking WITHIN an existing multi-cell or
+   * multi-row/col selection leaves it alone, so the menu action applies
+   * to the whole thing (e.g. "selecting 10 rows and doing insert below
+   * inserts 10 rows," which needs the existing selection preserved, not
+   * collapsed to just the row that happened to be right-clicked).
+   */
+  _onContextMenu(e) {
+    const cellTd = e.target.closest('td');
+    const rowTh = e.target.closest('tbody th');
+    const colTh = e.target.closest('thead th');
+    if (!cellTd && !rowTh && !colTh) return;
+    e.preventDefault();
+
+    let detail;
+    if (cellTd) {
+      const ref = cellTd.dataset.ref;
+      const withinSelection = this.anchor && this.selected && this._rangeRefs(this.anchor, this.selected).includes(ref);
+      if (!withinSelection) this._select(ref, false);
+      detail = { kind: 'cell', x: e.clientX, y: e.clientY };
+    } else if (rowTh) {
+      const rowIndex = Number(rowTh.dataset.rowIndex);
+      const range = this._selectedWholeRowRange();
+      if (!range || rowIndex < range.start || rowIndex > range.end) this.selectWholeRow(rowIndex, false);
+      detail = { kind: 'row-header', rowIndex, x: e.clientX, y: e.clientY };
+    } else {
+      const colIndex = Number(colTh.dataset.colIndex);
+      const range = this._selectedWholeColRange();
+      if (!range || colIndex < range.start || colIndex > range.end) this.selectWholeColumn(colIndex, false);
+      detail = { kind: 'col-header', colIndex, x: e.clientX, y: e.clientY };
+    }
+    this.container.dispatchEvent(new CustomEvent('gridcontextmenu', { detail }));
+  }
+
+  /**
+   * Row/column header click selects the whole row/column -- represented
+   * with the exact same anchor/selected rectangle mechanism as a plain
+   * cell-range selection (anchor = one edge of the row/column, selected =
+   * the other), not a separate selection mode. This is what lets every
+   * existing range-based operation (copy, clear, format, and the
+   * multi-row/col insert-count logic below) work on a whole-row/column
+   * selection for free, with no special-casing anywhere else.
+   *
+   * extend=true (drag across headers, or shift-click) grows the range from
+   * the ORIGINAL anchor row/col to rowIndex/colIndex, keeping that anchor
+   * fixed -- not a plain re-select -- so dragging from row 3 to row 7
+   * selects rows 3-7, not just re-picks row 7 each time.
+   */
+  selectWholeRow(rowIndex, extend) {
+    if (this.editingInput) this._commitEdit();
+    // extend=false (a fresh click, or the mousedown that starts a drag)
+    // re-anchors here; extend=true (shift-click, or every mousemove tick
+    // during that same drag) keeps whatever anchor was already set, so a
+    // drag from row 3 to row 7 selects rows 3-7, not just re-picks row 7
+    // each tick.
+    if (!extend || this._headerAnchorRow === null || this._headerAnchorRow === undefined) {
+      this._headerAnchorRow = rowIndex;
+    }
+    const lastCol = colLetter(this.cols - 1);
+    this.anchor = 'A' + (this._headerAnchorRow + 1);
+    this.selected = lastCol + (rowIndex + 1);
+    this._highlightRange(this.anchor, this.selected);
+    if (this.onSelectionChange) this.onSelectionChange(this.selected);
+  }
+
+  selectWholeColumn(colIndex, extend) {
+    if (this.editingInput) this._commitEdit();
+    if (!extend || this._headerAnchorCol === null || this._headerAnchorCol === undefined) {
+      this._headerAnchorCol = colIndex;
+    }
+    this.anchor = colLetter(this._headerAnchorCol) + '1';
+    this.selected = colLetter(colIndex) + this.rows;
+    this._highlightRange(this.anchor, this.selected);
+    if (this.onSelectionChange) this.onSelectionChange(this.selected);
+  }
+
+  _onRowHeaderMouseDown(e, rowIndex) {
+    if (e.button !== 0) return; // right-click is handled by _onContextMenu, don't also start a drag-select
+    e.preventDefault();
+    this._headerDragging = 'row';
+    this.selectWholeRow(rowIndex, e.shiftKey);
+  }
+
+  _onColHeaderMouseDown(e, colIndex) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    this._headerDragging = 'col';
+    this.selectWholeColumn(colIndex, e.shiftKey);
+  }
+
+  /**
+   * Whether the current selection IS a whole-row(s) selection (spans every
+   * column, A through the last one) -- used both to highlight/represent
+   * multi-row header selections and to size an insert/delete triggered
+   * from the row-header context menu ("selecting 10 rows and doing insert
+   * below inserts 10 rows" -- see showHeaderContextMenu in app.js).
+   * @returns {{start: number, end: number}|null} 0-indexed, inclusive.
+   */
+  _selectedWholeRowRange() {
+    if (!this.anchor || !this.selected) return null;
+    const pa = parseRef(this.anchor), ps = parseRef(this.selected);
+    if (pa.col !== 0 || ps.col !== this.cols - 1) return null;
+    return { start: Math.min(pa.row, ps.row), end: Math.max(pa.row, ps.row) };
+  }
+
+  /** Column counterpart of _selectedWholeRowRange -- spans every row, top to bottom. */
+  _selectedWholeColRange() {
+    if (!this.anchor || !this.selected) return null;
+    const pa = parseRef(this.anchor), ps = parseRef(this.selected);
+    if (pa.row !== 0 || ps.row !== this.rows - 1) return null;
+    return { start: Math.min(pa.col, ps.col), end: Math.max(pa.col, ps.col) };
   }
 
   _select(ref, extend) {
@@ -708,18 +905,7 @@ export class Grid {
       this._beginEdit(this.selected);
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
-      // Deliberately doesn't route through setCellValue()/its userinfo-
-      // cookie-sync hook: clearing a cell isn't "the user typed a new
-      // value" for that field, and syncing an empty string would erase
-      // their remembered email/name just because they cleared one cell
-      // that happened to display it -- worse than not syncing at all.
-      for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
-        if (this.cells[ref]) {
-          delete this.cells[ref];
-          this.onChange({ cells: { [ref]: null } });
-          this._renderCell(ref);
-        }
-      }
+      this._clearSelection();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
       // The native 'copy' event (see _onCopy below) only fires when there's
       // an actual browser text/DOM selection, which clicking a cell never
@@ -740,8 +926,8 @@ export class Grid {
   /** Merged cell landed on by keyboard navigation redirects to its origin -- there's nothing else there to select. */
   _moveSelection(dc, dr) {
     const p = parseRef(this.selected);
-    let col = Math.min(COLS - 1, Math.max(0, p.col + dc));
-    let row = Math.min(ROWS - 1, Math.max(0, p.row + dr));
+    let col = Math.min(this.cols - 1, Math.max(0, p.col + dc));
+    let row = Math.min(this.rows - 1, Math.max(0, p.row + dr));
     let ref = colLetter(col) + (row + 1);
     if (this._isCovered(ref)) {
       const origin = this._originOf(ref);
@@ -839,6 +1025,36 @@ export class Grid {
     } else {
       this._applyTsvAtSelection(this._internalClipboard, this._internalClipboardOrigin);
     }
+  }
+
+  /**
+   * Removes value+format+merge from every visible cell in the selection
+   * (a right-click "Clear contents" or Delete/Backspace) -- shared by
+   * _onKeyDown's Delete handler and the cell context menu (see
+   * showCellContextMenu in app.js) so there's one place that decides what
+   * "clearing a cell" means, not two copies that could drift.
+   *
+   * Deliberately doesn't route through setCellValue()/its userinfo-cookie-
+   * sync hook: clearing a cell isn't "the user typed a new value" for that
+   * field, and syncing an empty string would erase their remembered email/
+   * name just because they cleared one cell that happened to display it --
+   * worse than not syncing at all (see CELL_SCHEMA.md, USERINFO cells).
+   */
+  _clearSelection() {
+    if (this.readOnly || !this.anchor || !this.selected) return;
+    for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
+      if (this.cells[ref]) {
+        delete this.cells[ref];
+        this.onChange({ cells: { [ref]: null } });
+        this._renderCell(ref);
+      }
+    }
+  }
+
+  /** Right-click "Cut": copy, then clear -- same two operations Ctrl+X would do if this app bound that shortcut. */
+  _cutSelectionToClipboard() {
+    this._copySelectionToClipboard();
+    this._clearSelection();
   }
 
   // Native copy/paste events: only fire given an actual browser
@@ -940,6 +1156,189 @@ export class Grid {
     this.onChange({ cells: { [origin]: { merge: null } } });
     this._build();
     return { ok: true };
+  }
+
+  // --- Structural insert/delete row/column ---------------------------
+  //
+  // Public entry points (called from app.js's header context menu, see
+  // showHeaderContextMenu): insertRowsAt/deleteRowsAt/insertColumnsAt/
+  // deleteColumnsAt. boundaryIndex is always 0-indexed. insert means
+  // "count new rows/columns appear starting AT boundaryIndex, pushing
+  // whatever was there down/right"; delete means "count rows/columns
+  // starting AT boundaryIndex are removed." Both funnel through
+  // _transformStructure, which does the actual cell/columnWidths/
+  // rowHeights remapping and formula-reference fixup, then emits one
+  // onChange patch and rebuilds.
+
+  insertRowsAt(boundaryIndex, count) {
+    if (this.readOnly || count < 1) return;
+    this._transformStructure('row', boundaryIndex, count, true);
+  }
+
+  insertColumnsAt(boundaryIndex, count) {
+    if (this.readOnly || count < 1) return;
+    this._transformStructure('col', boundaryIndex, count, true);
+  }
+
+  /** Clamps count so at least MIN_ROWS survives -- never delete a grid down to zero rows. */
+  deleteRowsAt(boundaryIndex, count) {
+    if (this.readOnly || count < 1) return;
+    const clamped = Math.min(count, Math.max(0, this.rows - MIN_ROWS));
+    if (clamped < 1) return;
+    this._transformStructure('row', boundaryIndex, clamped, false);
+  }
+
+  deleteColumnsAt(boundaryIndex, count) {
+    if (this.readOnly || count < 1) return;
+    const clamped = Math.min(count, Math.max(0, this.cols - MIN_COLS));
+    if (clamped < 1) return;
+    this._transformStructure('col', boundaryIndex, clamped, false);
+  }
+
+  /**
+   * Core structural transform shared by all four insert/delete methods
+   * above.
+   *
+   * 1. Rebuilds `this.cells` from scratch: every surviving cell's
+   *    position is remapped (shifted if at/after boundaryIndex, removed
+   *    if it falls inside a deleted range), AND -- independently of
+   *    whether that particular cell's own position changed -- any formula
+   *    VALUE is passed through shiftReferencesForStructuralChange() (see
+   *    formulas.js), since a cell that didn't move can still reference
+   *    one that did. This is a best-effort formula-reference fixup, not
+   *    full dependency-graph correctness -- see that function's doc
+   *    comment for exactly what it does and doesn't handle.
+   * 2. Remaps columnWidths/rowHeights' sparse override keys the same way.
+   * 3. Updates this.cols/this.rows.
+   * 4. Builds ONE merge-patch covering all of the above (every vacated
+   *    old position nulled, every occupied new position set -- see
+   *    _diffKeyedMap) and emits it via onChange, then rebuilds.
+   */
+  _transformStructure(dimension, boundaryIndex, count, isInsert) {
+    const newCells = {};
+    for (const [ref, cell] of Object.entries(this.cells)) {
+      const p = parseRef(ref);
+      const idx = dimension === 'row' ? p.row : p.col;
+      if (!isInsert && idx >= boundaryIndex && idx < boundaryIndex + count) continue; // this cell is being deleted
+
+      let newIdx = idx;
+      if (isInsert) {
+        if (idx >= boundaryIndex) newIdx = idx + count;
+      } else if (idx >= boundaryIndex + count) {
+        newIdx = idx - count;
+      }
+      const newRow = dimension === 'row' ? newIdx : p.row;
+      const newCol = dimension === 'col' ? newIdx : p.col;
+      const newRef = colLetter(newCol) + (newRow + 1);
+
+      let newCell = cell;
+      if (cell && isFormula(cell.value)) {
+        const shifted = shiftReferencesForStructuralChange(cell.value, dimension, boundaryIndex, count, isInsert);
+        if (shifted !== cell.value) newCell = { ...cell, value: shifted };
+      }
+      newCells[newRef] = newCell;
+    }
+
+    const newColumnWidths = dimension === 'col'
+      ? this._shiftSparseKeys(this.columnWidths, boundaryIndex, count, isInsert, true)
+      : this.columnWidths;
+    const newRowHeights = dimension === 'row'
+      ? this._shiftSparseKeys(this.rowHeights, boundaryIndex, count, isInsert, false)
+      : this.rowHeights;
+
+    // Cells patch: null every vacated old ref (nothing occupies it anymore
+    // -- _diffKeyedMap's first pass), then a CANONICALIZED full value
+    // (explicit null for any of format/merge/userinfo the incoming cell
+    // doesn't have) for every position whose content actually changed.
+    // Canonicalizing matters specifically here, unlike setCellValue()'s
+    // deliberately partial {value}-only patches elsewhere: a shift can
+    // land a cell on top of a DIFFERENT position that previously held
+    // different content, and RFC 7396 merge patch only clears keys
+    // explicitly set to null -- an omitted key survives merged into the
+    // target on a REMOTE collaborator applying this patch (the local
+    // `this.cells = newCells` assignment below is unaffected either way,
+    // it's a full replace, not a merge). Only cells whose position or
+    // content actually changed are included, to keep the patch small.
+    const cellsPatch = {};
+    for (const oldRef of Object.keys(this.cells)) {
+      if (!(oldRef in newCells)) cellsPatch[oldRef] = null;
+    }
+    for (const [ref, newCell] of Object.entries(newCells)) {
+      if (this.cells[ref] === newCell) continue; // unaffected -- same object at the same key, nothing to send
+      cellsPatch[ref] = {
+        value: newCell.value,
+        format: newCell.format ?? null,
+        merge: newCell.merge ?? null,
+        userinfo: newCell.userinfo ?? null,
+      };
+    }
+    const patch = { cells: cellsPatch };
+    const widthsDiff = this._diffKeyedMap(this.columnWidths, newColumnWidths);
+    const heightsDiff = this._diffKeyedMap(this.rowHeights, newRowHeights);
+    if (Object.keys(widthsDiff).length) patch.columnWidths = widthsDiff;
+    if (Object.keys(heightsDiff).length) patch.rowHeights = heightsDiff;
+
+    this.cells = newCells;
+    this.columnWidths = newColumnWidths;
+    this.rowHeights = newRowHeights;
+    if (dimension === 'col') {
+      this.cols = isInsert ? this.cols + count : Math.max(MIN_COLS, this.cols - count);
+      patch.cols = this.cols;
+    } else {
+      this.rows = isInsert ? this.rows + count : Math.max(MIN_ROWS, this.rows - count);
+      patch.rows = this.rows;
+    }
+
+    this.anchor = null;
+    this.selected = null;
+    this._headerAnchorRow = null;
+    this._headerAnchorCol = null;
+    this.onChange(patch);
+    this._build();
+  }
+
+  /**
+   * Remaps a sparse override map's keys (columnWidths: column letters,
+   * rowHeights: 1-indexed row-number strings) the same way
+   * _transformStructure remaps cell positions -- an override on column D
+   * moves to column E if a column is inserted before D, and is dropped
+   * entirely if D itself is deleted.
+   */
+  _shiftSparseKeys(map, boundaryIndex, count, isInsert, isColKeys) {
+    const result = {};
+    for (const [key, value] of Object.entries(map)) {
+      const idx = isColKeys ? parseRef(key + '1').col : parseInt(key, 10) - 1;
+      if (!isInsert && idx >= boundaryIndex && idx < boundaryIndex + count) continue;
+      let newIdx = idx;
+      if (isInsert) {
+        if (idx >= boundaryIndex) newIdx += count;
+      } else if (idx >= boundaryIndex + count) {
+        newIdx -= count;
+      }
+      const newKey = isColKeys ? colLetter(newIdx) : String(newIdx + 1);
+      result[newKey] = value;
+    }
+    return result;
+  }
+
+  /**
+   * Builds a merge-patch fragment from an old->new keyed-object transform:
+   * every key present in `oldMap` but absent from `newMap` (vacated) maps
+   * to null; every key in `newMap` (occupied, whether it's a survivor at
+   * a new position or genuinely new) maps to its value. Order matters --
+   * the null pass must run first so a position that's simultaneously
+   * vacated-by-one-entry and occupied-by-another ends up with the
+   * occupying value, not null.
+   */
+  _diffKeyedMap(oldMap, newMap) {
+    const patch = {};
+    for (const key of Object.keys(oldMap)) {
+      if (!(key in newMap)) patch[key] = null;
+    }
+    for (const [key, value] of Object.entries(newMap)) {
+      patch[key] = value;
+    }
+    return patch;
   }
 }
 

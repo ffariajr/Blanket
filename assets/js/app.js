@@ -532,6 +532,19 @@ async function renderSheet(spreadsheetId, tabId) {
     socket.sendKeystroke({ at: Date.now() });
   });
 
+  // grid.js suppresses the native browser context menu and dispatches this
+  // instead (see Grid._onContextMenu) -- it does the data-layer work
+  // (which cell/row/column, adjusting the selection), app.js owns the
+  // actual menu UI, consistent with mergeSelection() etc. returning
+  // {ok,error} for app.js to surface rather than grid.js having any
+  // dialog/menu machinery of its own.
+  gridContainer.addEventListener('gridcontextmenu', (e) => {
+    const { kind, x, y, rowIndex, colIndex } = e.detail;
+    if (kind === 'cell') showCellContextMenu(x, y, grid);
+    else if (kind === 'row-header') showHeaderContextMenu(x, y, grid, 'row', rowIndex);
+    else if (kind === 'col-header') showHeaderContextMenu(x, y, grid, 'col', colIndex);
+  });
+
   currentTeardown = () => {
     clearInterval(savedTick);
     socket.close();
@@ -748,6 +761,79 @@ async function showShare(spreadsheetId, shareUrl) {
   ]);
   document.body.appendChild(dialog);
   await refresh();
+}
+
+// Shared floating-menu positioning/dismiss logic for both context menus
+// below (and reusable for anything else that wants a menu at the cursor
+// rather than anchored to a button, unlike showTabMenu's anchorEl variant).
+// Reuses the .tab-menu/.tab-menu-item CSS classes -- same floating-card
+// look, just positioned differently.
+function showContextMenuAt(x, y, items) {
+  document.querySelectorAll('.tab-menu').forEach((n) => n.remove());
+  const menu = el('div', { class: 'tab-menu' }, items.map(([label, onclick]) =>
+    el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); onclick(); } }, label)));
+  document.body.appendChild(menu);
+  // Clamp so the menu doesn't render off the right/bottom edge of the viewport.
+  menu.style.left = `${Math.min(x, window.innerWidth - menu.offsetWidth - 8) + window.scrollX}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - menu.offsetHeight - 8) + window.scrollY}px`;
+
+  function close() {
+    menu.remove();
+    document.removeEventListener('click', onDocClick);
+    document.removeEventListener('contextmenu', close);
+  }
+  function onDocClick(e) {
+    if (!menu.contains(e.target)) close();
+  }
+  setTimeout(() => {
+    document.addEventListener('click', onDocClick);
+    document.addEventListener('contextmenu', close); // right-clicking elsewhere closes this one instead of stacking
+  }, 0);
+}
+
+/** Right-click on a cell/selection: Cut, Copy, Paste, Clear contents -- the "common menu options" Fernando asked for. Reuses the exact same Ctrl+C/V/Delete logic, not a parallel implementation. */
+function showCellContextMenu(x, y, grid) {
+  const items = [
+    ['Cut', () => grid._cutSelectionToClipboard()],
+    ['Copy', () => grid._copySelectionToClipboard()],
+  ];
+  if (!grid.readOnly) {
+    items.push(
+      ['Paste', () => grid._pasteClipboardAtSelection()],
+      ['Clear contents', () => grid._clearSelection()],
+    );
+  }
+  showContextMenuAt(x, y, items);
+}
+
+/**
+ * Right-click on a row/column header: Insert above/below (rows) or
+ * left/right (columns), Delete -- distinct from showCellContextMenu above
+ * per Fernando's own framing (insert/delete is a header-specific action).
+ *
+ * Count and boundary come from the grid's current whole-row/column
+ * selection if the right-clicked header is part of one (see
+ * Grid._selectedWholeRowRange/_selectedWholeColRange) -- "selecting 10
+ * rows and doing insert below inserts 10 rows below," not just 1.
+ */
+function showHeaderContextMenu(x, y, grid, kind, index) {
+  if (grid.readOnly) return;
+  const range = kind === 'row' ? grid._selectedWholeRowRange() : grid._selectedWholeColRange();
+  const inRange = range && index >= range.start && index <= range.end;
+  const start = inRange ? range.start : index;
+  const end = inRange ? range.end : index;
+  const count = end - start + 1;
+
+  const items = kind === 'row' ? [
+    [`Insert ${count} row${count > 1 ? 's' : ''} above`, () => grid.insertRowsAt(start, count)],
+    [`Insert ${count} row${count > 1 ? 's' : ''} below`, () => grid.insertRowsAt(end + 1, count)],
+    [`Delete row${count > 1 ? 's' : ''}`, () => grid.deleteRowsAt(start, count)],
+  ] : [
+    [`Insert ${count} column${count > 1 ? 's' : ''} left`, () => grid.insertColumnsAt(start, count)],
+    [`Insert ${count} column${count > 1 ? 's' : ''} right`, () => grid.insertColumnsAt(end + 1, count)],
+    [`Delete column${count > 1 ? 's' : ''}`, () => grid.deleteColumnsAt(start, count)],
+  ];
+  showContextMenuAt(x, y, items);
 }
 
 // Small floating dropdown for the currently-viewed tab's quick actions.

@@ -14,6 +14,10 @@ use Blanket\Repositories\TabRepository;
 
 final class TabController
 {
+    /** Default grid dimensions for a newly created tab -- see CELL_SCHEMA.md, "cols/rows". */
+    public const DEFAULT_COLS = 6;  // A-F
+    public const DEFAULT_ROWS = 20;
+
     public function __construct(
         private readonly TabRepository $tabs = new TabRepository(),
         private readonly SpreadsheetRepository $spreadsheets = new SpreadsheetRepository(),
@@ -53,9 +57,16 @@ final class TabController
         $position = $this->tabs->nextPosition($spreadsheet['id']);
         $tabId = $this->tabs->create($spreadsheet['id'], $name, $position);
 
+        // cols/rows: a new tab's initial grid dimensions (Fernando: "that
+        // new tab should have cols A-F, and 20 rows"). Stored inside the
+        // history row's data, not the tabs table -- grid dimensions are
+        // part of the document, the same as cells/columnWidths/rowHeights
+        // (see CELL_SCHEMA.md). Applies to any newly created tab, not just
+        // a new workbook's auto-created first one (SpreadsheetController::
+        // create() below reuses this same default for consistency).
         $this->history->save(
             $tabId,
-            ['cells' => (object) []],
+            ['cells' => (object) [], 'cols' => self::DEFAULT_COLS, 'rows' => self::DEFAULT_ROWS],
             $user,
             $request->clientIp(),
             is_string($editorName) ? $editorName : null,
@@ -109,6 +120,16 @@ final class TabController
 
         if (!$this->permissions->canEdit($spreadsheet, $user)) {
             Response::error('Forbidden', 403);
+        }
+
+        // A spreadsheet must always have at least one tab -- enforced here,
+        // not just client-side (Manage Tabs already hides the option when
+        // only one remains), since the client can't be trusted for an
+        // invariant this important (e.g. SpreadsheetController::create()
+        // relies on "a new spreadsheet always has exactly one tab" only
+        // holding until a human chooses to delete it down to zero).
+        if (count($this->tabs->listForSpreadsheet($spreadsheet['id'])) <= 1) {
+            Response::error('Cannot delete the last tab in a spreadsheet', 422);
         }
 
         $current = $this->history->current($tabId);

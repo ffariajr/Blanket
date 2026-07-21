@@ -18,7 +18,9 @@
     "D1": { "value": "fernando@example.com", "userinfo": { "field": "email", "autoSaveToCookie": true } }
   },
   "columnWidths": { "A": 120, "C": 80 },
-  "rowHeights": { "3": 40 }
+  "rowHeights": { "3": 40 },
+  "cols": 6,
+  "rows": 20
 }
 ```
 
@@ -175,6 +177,77 @@ present (default width/height applies when absent). Keys are column
 letters (`columnWidths`) or 1-based row numbers as strings
 (`rowHeights`); values are pixel widths/heights. Set via drag handles in
 the grid UI (`Grid._colResizeHandle`/`_rowResizeHandle`).
+
+## `cols` / `rows`
+
+Top-level integers: the grid's actual dimensions for this tab — not a
+fixed global size. A new tab is created with `cols: 6` (A–F), `rows: 20`
+(`TabController::DEFAULT_COLS`/`DEFAULT_ROWS`, also used by
+`SpreadsheetController::create()` for a new workbook's auto-created first
+tab, `"tab-0"`). `Grid` reads these into `this.cols`/`this.rows` (see
+`assets/js/grid.js`) — every loop, coordinate calc, and bounds check in
+the class uses the instance values, not a module constant. A document
+saved before this feature existed has neither key; `Grid` falls back to
+`LEGACY_COLS`/`LEGACY_ROWS` (30×100, the old fixed size) so pre-existing
+data doesn't lose visibility into cells beyond the new smaller default —
+this fallback only ever matters for old data, since every new tab always
+has both keys explicit from creation on.
+
+### Insert/delete rows and columns
+
+Right-click a row or column header for Insert above/below (rows) or
+left/right (columns), or Delete — see `showHeaderContextMenu` in
+`assets/js/app.js` and `Grid.insertRowsAt`/`deleteRowsAt`/
+`insertColumnsAt`/`deleteColumnsAt` in `grid.js`. If the right-clicked
+header is part of an existing whole-row/column selection (see "Row/column
+header selection" below), the count matches the selection size — selecting
+10 rows and choosing Insert below inserts 10 rows, not 1.
+
+`Grid._transformStructure()` does the actual work: every cell's position
+shifts (or the cell is removed, if it falls inside a deleted range),
+`columnWidths`/`rowHeights` sparse override keys shift the same way, and
+`cols`/`rows` update. Deleting is clamped so at least one row/column always
+survives (`MIN_COLS`/`MIN_ROWS`) — a grid can never shrink to zero.
+
+Formula references throughout the WHOLE document are also adjusted —
+not just formulas in cells that moved, since a cell that didn't move can
+still reference one that did — via `shiftReferencesForStructuralChange()`
+in `formulas.js`. This is a **different transform** than
+`shiftFormulaReferences()` (copy/paste, above): `$` locking is irrelevant
+here (locking only matters for "does this reference move when the formula
+itself is copied," not "does this reference move when some other row/
+column is structurally inserted or removed" — a locked and unlocked
+reference to the same cell shift identically on insert/delete). A
+reference landing inside a deleted range invalidates the whole formula to
+`=#REF!`, same convention as the copy/paste transform. This is a
+best-effort pass, not full dependency-graph correctness (e.g. a range
+whose two ends land on opposite sides of a delete boundary isn't given
+special handling) — get the common cases right, fall back to `#REF!`
+rather than silently computing something wrong.
+
+The wire patch for a structural change explicitly nulls `format`/`merge`/
+`userinfo` on every repositioned cell that doesn't have them, rather than
+omitting those keys the way `setCellValue()`'s partial `{value}`-only
+patches do elsewhere — necessary here specifically, since a shift can land
+a cell on top of a position that previously held *different* content: RFC
+7396 merge patch only clears a key if it's explicitly `null` in the patch,
+so an omitted key would otherwise survive merged into the target on a
+remote collaborator applying the patch (the local copy is unaffected
+either way — a full `this.cells` replacement, not a merge). An explicit
+`null` for one of these keys is equivalent to the key being absent
+everywhere that reads it (all read sites use `cell.format || {}`-style
+fallbacks) — this is the one place in the schema an optional key might be
+present-but-null instead of omitted, and it's intentional.
+
+### Row/column header selection
+
+Clicking a row-number or column-letter header selects every cell in that
+row/column — represented with the exact same anchor/selected rectangle
+mechanism as an ordinary cell-range selection (`Grid.selectWholeRow`/
+`selectWholeColumn`), not a separate selection mode. That's what lets
+copy/clear/format and the insert/delete count above work on a whole-row/
+column selection for free. Dragging across headers or shift-clicking
+extends the selection to multiple rows/columns.
 
 ## Empty-object handling
 
