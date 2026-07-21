@@ -123,12 +123,19 @@ export class Grid {
 
     this._coverage = this._computeCoverage();
 
+    // Cached element refs (col by index, row <tr> by index) so a live
+    // resize drag can write directly to the one element that changed --
+    // see _onResizeMove -- instead of re-touching every column/row on
+    // every mousemove (that was the old behavior; see _applyColumnWidths'
+    // doc comment for why it was a real perf/flicker bug, not just slow).
+    this._colElements = [];
     const colgroup = document.createElement('colgroup');
     colgroup.appendChild(document.createElement('col')); // row-header column
     for (let c = 0; c < COLS; c++) {
       const col = document.createElement('col');
       col.style.width = (this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH) + 'px';
       colgroup.appendChild(col);
+      this._colElements.push(col);
     }
     table.appendChild(colgroup);
 
@@ -139,7 +146,7 @@ export class Grid {
       const letter = colLetter(c);
       const th = document.createElement('th');
       th.textContent = letter;
-      th.appendChild(this._colResizeHandle(letter));
+      th.appendChild(this._colResizeHandle(letter, this._colElements[c]));
       headRow.appendChild(th);
     }
     thead.appendChild(headRow);
@@ -156,14 +163,16 @@ export class Grid {
     // "a bit slow"), which is a real cost even if browsers hide it better.
     this._cellElements = new Map();
 
+    this._rowElements = [];
     const tbody = document.createElement('tbody');
     for (let r = 0; r < ROWS; r++) {
       const rowNum = r + 1;
       const tr = document.createElement('tr');
       tr.style.height = (this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT) + 'px';
+      this._rowElements.push(tr);
       const rowHead = document.createElement('th');
       rowHead.textContent = String(rowNum);
-      rowHead.appendChild(this._rowResizeHandle(rowNum));
+      rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
       tr.appendChild(rowHead);
       for (let c = 0; c < COLS; c++) {
         const ref = colLetter(c) + rowNum;
@@ -230,7 +239,7 @@ export class Grid {
     return this._coverage.has(ref);
   }
 
-  _colResizeHandle(letter) {
+  _colResizeHandle(letter, colEl) {
     const handle = document.createElement('span');
     handle.className = 'col-resize-handle';
     handle.addEventListener('mousedown', (e) => {
@@ -239,12 +248,13 @@ export class Grid {
       this._resizing = {
         kind: 'col', key: letter, startPx: e.clientX,
         startSize: this.columnWidths[letter] || DEFAULT_COL_WIDTH,
+        el: colEl,
       };
     });
     return handle;
   }
 
-  _rowResizeHandle(rowNum) {
+  _rowResizeHandle(rowNum, rowEl) {
     const handle = document.createElement('span');
     handle.className = 'row-resize-handle';
     handle.addEventListener('mousedown', (e) => {
@@ -253,6 +263,7 @@ export class Grid {
       this._resizing = {
         kind: 'row', key: rowNum, startPx: e.clientY,
         startSize: this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT,
+        el: rowEl,
       };
     });
     return handle;
@@ -260,15 +271,25 @@ export class Grid {
 
   _onResizeMove(e) {
     if (!this._resizing) return;
-    const { kind, startPx, startSize } = this._resizing;
+    const { kind, startPx, startSize, el } = this._resizing;
     if (kind === 'col') {
       const size = Math.max(MIN_COL_WIDTH, startSize + (e.clientX - startPx));
       this._resizing.liveSize = size;
-      this._applyColumnWidths({ [this._resizing.key]: size });
+      // Write directly to the one <col> being dragged -- not
+      // _applyColumnWidths(), which used to loop over every column on
+      // every mousemove (see its doc comment). A <col> width write
+      // already forces the browser to recompute the whole table's
+      // column layout once; doing that redundantly for N-1 unchanged
+      // columns on every mousemove was the actual cost, not the resize
+      // itself, and was very likely what read as "affects other
+      // columns" too -- the stored data was never wrong (_onResizeEnd
+      // only ever commits this one key), just the rendering was
+      // thrashing under that load.
+      if (el) el.style.width = size + 'px';
     } else {
       const size = Math.max(MIN_ROW_HEIGHT, startSize + (e.clientY - startPx));
       this._resizing.liveSize = size;
-      this._applyRowHeights({ [this._resizing.key]: size });
+      if (el) el.style.height = size + 'px';
     }
   }
 
@@ -286,24 +307,34 @@ export class Grid {
     }
   }
 
-  /** overrides: optional {key: px} to apply live during a drag before it's committed to this.columnWidths. */
-  _applyColumnWidths(overrides) {
-    if (!this.table) return;
-    const cols = this.table.querySelectorAll('colgroup col');
+  /**
+   * Full re-sync of every column's width from this.columnWidths. Used
+   * after a remote patch touches (possibly several) column widths at
+   * once -- see applyRemote. NOT used for a live local drag; that writes
+   * straight to the one dragged element (_onResizeMove) instead of
+   * looping over every column here on every mousemove, which is what
+   * used to make column resizing noticeably slower than row resizing
+   * (touching a <col>'s width forces a whole-table column-layout
+   * recompute, so doing it once per unchanged column per mousemove was
+   * real, measurable waste, not just untidy code) and was the likely
+   * cause of other columns visibly flickering during a drag even though
+   * their stored widths were never actually touched.
+   */
+  _applyColumnWidths() {
+    if (!this._colElements) return;
     for (let c = 0; c < COLS; c++) {
-      const letter = colLetter(c);
-      const width = (overrides && overrides[letter]) || this.columnWidths[letter] || DEFAULT_COL_WIDTH;
-      if (cols[c + 1]) cols[c + 1].style.width = width + 'px';
+      const width = this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
+      if (this._colElements[c]) this._colElements[c].style.width = width + 'px';
     }
   }
 
-  _applyRowHeights(overrides) {
-    if (!this.table) return;
-    const rows = this.table.querySelectorAll('tbody tr');
+  /** Row-height counterpart of _applyColumnWidths -- same reasoning, see its doc comment. */
+  _applyRowHeights() {
+    if (!this._rowElements) return;
     for (let r = 0; r < ROWS; r++) {
       const rowNum = r + 1;
-      const height = (overrides && overrides[rowNum]) || this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
-      if (rows[r]) rows[r].style.height = height + 'px';
+      const height = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
+      if (this._rowElements[r]) this._rowElements[r].style.height = height + 'px';
     }
   }
 
@@ -363,7 +394,7 @@ export class Grid {
     el.style.color = fmt.color || '';
     el.style.background = fmt.bg || '';
     el.style.fontFamily = FONT_FAMILIES[fmt.fontFamily] || '';
-    el.style.fontSize = FONT_SIZES[fmt.fontSize] || '';
+    el.style.fontSize = fmt.fontSize ? fmt.fontSize + 'pt' : '';
   }
 
   /**
@@ -822,9 +853,10 @@ export const FONT_FAMILIES = {
   monospace: '"SFMono-Regular", Consolas, monospace',
 };
 
-export const FONT_SIZES = {
-  small: '11px',
-  normal: '13px',
-  large: '16px',
-  xlarge: '20px',
-};
+// format.fontSize is a plain point-size number now (matches Excel/Word's
+// own font-size convention), not a preset key like the old small/normal/
+// large/xlarge -- see CELL_SCHEMA.md. This is the fixed dropdown list of
+// common sizes (Fernando: "use the common font size numbers 8 - 72"), not
+// free-text -- cell rendering still just does `fmt.fontSize + 'pt'`
+// directly for any of these.
+export const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72];
