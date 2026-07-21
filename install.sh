@@ -30,15 +30,20 @@ fi
 
 RSYNC_ARGS=(
   -av --delete
-  # The deploy directory itself is owned by www-data; the claude user only
-  # has group write on its contents, not ownership of the directory entry
-  # -- rsync trying to sync the top-level destination directory's own
-  # mtime/permissions to match the source root fails with "Operation not
-  # permitted" (exit 23) even though every file transfers fine, since that
-  # requires owning the directory entry itself, not just group-write on
-  # its contents. Skip both to avoid that false-negative failure.
+  # -a implies preserving mtime/perms/owner/group. This deploy directory
+  # is www-data owned; the claude user only has group write on its
+  # contents, not ownership of the directory entries themselves -- rsync
+  # trying to sync any of those four attributes to match the source
+  # fails with "Operation not permitted" (exit 23) even though the actual
+  # file *content* transfers correctly every time (confirmed repeatedly:
+  # first mtime, then perms, then -- once new top-level entries showed up
+  # in a later deploy -- group too). Skip all four; content transfer
+  # doesn't need them, and www-data ending up owning the tree isn't
+  # something claude can do here anyway (would need chgrp as root).
   --omit-dir-times
   --no-perms
+  --no-owner
+  --no-group
   # No trailing slash: a trailing slash only matches a *directory* named
   # .git, which is true in a normal checkout but not in a git worktree
   # (there .git is a plain file pointing back at the main repo) -- a
@@ -85,9 +90,15 @@ else
   # their own permission handling (see deploy/README.md).
   # -mindepth 1: the deploy root itself is owned by www-data (already
   # readable/traversable by it as owner) and not by claude, so chmod'ing
-  # it directly fails with "Operation not permitted" -- only its contents,
-  # which claude actually owns, need this.
-  find "$DEST_DIR" -mindepth 1 -type d -exec chmod o+rx {} +
-  find "$DEST_DIR" -mindepth 1 -type f -exec chmod o+r {} +
+  # it directly fails with "Operation not permitted" -- only its contents
+  # need this. Ownership under the root is a mix in practice -- some
+  # entries ended up www-data-owned from an earlier deploy (before
+  # --no-owner/--no-group were added above), most are claude-owned.
+  # chmod fails on ones claude doesn't own, but that's harmless: a
+  # www-data-owned file/dir already gives www-data full access as owner,
+  # it doesn't need this fix at all. Don't let those failures abort the
+  # script -- only ones claude actually owns can be fixed here anyway.
+  find "$DEST_DIR" -mindepth 1 -type d -exec chmod o+rx {} + 2>/dev/null || true
+  find "$DEST_DIR" -mindepth 1 -type f -exec chmod o+r {} + 2>/dev/null || true
   echo "Done."
 fi
