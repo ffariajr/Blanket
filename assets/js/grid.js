@@ -139,6 +139,7 @@ export class Grid {
       this._colElements.push(col);
     }
     table.appendChild(colgroup);
+    this._syncTableWidth();
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
@@ -168,12 +169,28 @@ export class Grid {
     const tbody = document.createElement('tbody');
     for (let r = 0; r < ROWS; r++) {
       const rowNum = r + 1;
+      const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
       const tr = document.createElement('tr');
-      tr.style.height = (this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT) + 'px';
+      tr.style.height = rowHeight + 'px';
       this._rowElements.push(tr);
       const rowHead = document.createElement('th');
       rowHead.textContent = String(rowNum);
       rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
+      // A <tr height> is only a floor in table layout -- content taller
+      // than it (e.g. a large font-size, see .toolbar's font-size
+      // control) grows the row instead of clipping, which is what
+      // Fernando's "changing font size should not resize cell to fit"
+      // is about. An explicit height + overflow:hidden directly on each
+      // cell (not just the row) is what actually clips oversized
+      // content -- percentage heights inside table cells resolve
+      // inconsistently enough across browsers that hardcoding the real
+      // pixel value here, kept in sync with the row height everywhere it
+      // changes (_applyRowHeights, the live-drag path in _onResizeMove),
+      // is the reliable option. Skipped for a rowSpan>1 origin cell
+      // below -- its natural height is the sum of the rows it spans, not
+      // this one row's height alone.
+      rowHead.style.height = rowHeight + 'px';
+      rowHead.style.overflow = 'hidden';
       tr.appendChild(rowHead);
       for (let c = 0; c < COLS; c++) {
         const ref = colLetter(c) + rowNum;
@@ -185,6 +202,10 @@ export class Grid {
         if (merge) {
           if (merge.cols > 1) td.colSpan = merge.cols;
           if (merge.rows > 1) td.rowSpan = merge.rows;
+        }
+        if (!merge || !merge.rows || merge.rows <= 1) {
+          td.style.height = rowHeight + 'px';
+          td.style.overflow = 'hidden';
         }
         tr.appendChild(td);
         this._cellElements.set(ref, td);
@@ -246,10 +267,16 @@ export class Grid {
     handle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const startSize = this.columnWidths[letter] || DEFAULT_COL_WIDTH;
       this._resizing = {
         kind: 'col', key: letter, startPx: e.clientX,
-        startSize: this.columnWidths[letter] || DEFAULT_COL_WIDTH,
+        startSize,
         el: colEl,
+        // Table width excluding the column being dragged, captured once
+        // at drag start -- _onResizeMove just adds the live size back to
+        // this fixed base on every move (O(1), no accumulation/drift
+        // risk across however many mousemoves the drag produces).
+        baseTableWidth: this._sumColumnWidths() - startSize,
       };
     });
     return handle;
@@ -287,10 +314,23 @@ export class Grid {
       // only ever commits this one key), just the rendering was
       // thrashing under that load.
       if (el) el.style.width = size + 'px';
+      // The table's own width has to track the live size too, not just
+      // the one <col> -- with table-layout:fixed (see app.css), a table
+      // with no explicit width falls back to fitting the space actually
+      // available in .grid-scroll, which reintroduces the exact
+      // "squeezes the other columns" bug this whole fix targets.
+      // baseTableWidth (sum of every OTHER column, fixed at drag start)
+      // + this column's current live size -- O(1) per mousemove, and
+      // exact regardless of move count since it's recomputed from a
+      // fixed base each time, never accumulated.
+      if (this.table) this.table.style.width = (this._resizing.baseTableWidth + size) + 'px';
     } else {
       const size = Math.max(MIN_ROW_HEIGHT, startSize + (e.clientY - startPx));
       this._resizing.liveSize = size;
-      if (el) el.style.height = size + 'px';
+      if (el) {
+        el.style.height = size + 'px';
+        this._syncRowCellHeights(el, size); // el is the <tr> here -- keep its cells' clipping height live during the drag too
+      }
     }
   }
 
@@ -327,6 +367,27 @@ export class Grid {
       const width = this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
       if (this._colElements[c]) this._colElements[c].style.width = width + 'px';
     }
+    this._syncTableWidth();
+  }
+
+  _sumColumnWidths() {
+    let total = 0;
+    for (let c = 0; c < COLS; c++) total += this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
+    return total;
+  }
+
+  /**
+   * Keeps the <table>'s own width equal to the sum of its columns' widths
+   * -- required alongside table-layout:fixed (see app.css) so the table
+   * can legitimately be wider than .grid-scroll and scroll horizontally,
+   * instead of being squeezed to fit it. Called after any full
+   * column-width re-sync (initial _build, remote patches via
+   * _applyColumnWidths); the live local-drag path in _onResizeMove
+   * updates this.table.style.width directly and cheaper, it doesn't call
+   * this.
+   */
+  _syncTableWidth() {
+    if (this.table) this.table.style.width = this._sumColumnWidths() + 'px';
   }
 
   /** Row-height counterpart of _applyColumnWidths -- same reasoning, see its doc comment. */
@@ -335,7 +396,24 @@ export class Grid {
     for (let r = 0; r < ROWS; r++) {
       const rowNum = r + 1;
       const height = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
-      if (this._rowElements[r]) this._rowElements[r].style.height = height + 'px';
+      const tr = this._rowElements[r];
+      if (!tr) continue;
+      tr.style.height = height + 'px';
+      this._syncRowCellHeights(tr, height);
+    }
+  }
+
+  /**
+   * Sets height+overflow:hidden on every direct cell of a row (skipping
+   * a rowSpan>1 origin cell, whose natural height should be the sum of
+   * the rows it spans, not this one) -- see the doc comment in _build()
+   * for why this needs to happen per-cell, not just on the <tr>.
+   */
+  _syncRowCellHeights(tr, height) {
+    for (const cell of tr.children) {
+      if (cell.rowSpan > 1) continue;
+      cell.style.height = height + 'px';
+      cell.style.overflow = 'hidden';
     }
   }
 

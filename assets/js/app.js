@@ -633,7 +633,16 @@ const FORMULA_HELP = [
 ];
 
 function showFormulaHelp() {
-  const dialog = el('div', { class: 'modal' }, [
+  const dialog = el('div', {
+    class: 'modal',
+    // Backdrop-click-to-close: only when the click lands on the backdrop
+    // itself, not bubbled up from a click inside .modal-content. No
+    // explicit close button (removed below) -- this is the only way out,
+    // matching how a native <dialog> or most modal libraries behave by
+    // default. Reusable pattern for future dialogs; only wired into this
+    // one for now.
+    onclick: (e) => { if (e.target === dialog) dialog.remove(); },
+  }, [
     el('div', { class: 'modal-content modal-content-wide' }, [
       el('h2', {}, 'Formulas'),
       el('p', { class: 'muted' }, 'Start a cell with = to enter a formula. Basic arithmetic (+ - * /) and comparisons (= <> < > <= >=) work directly on cell references and numbers, e.g. =A1+B1*2.'),
@@ -649,7 +658,6 @@ function showFormulaHelp() {
         el('code', {}, 'A$1'), ' (row locked), ', el('code', {}, '$A$1'), ' (both locked).',
       ]),
       el('p', { class: 'muted' }, 'Example: copying =CONCAT($A1, A$3, B4) from C5 to D6 becomes =CONCAT($A2, B$3, C5) — the $-locked parts stay put, everything else shifts by the same +1 column, +1 row the cell itself moved.'),
-      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
     ]),
   ]);
   document.body.appendChild(dialog);

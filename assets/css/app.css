@@ -47,6 +47,14 @@
 
 * { box-sizing: border-box; }
 
+/* html/body/#app need an explicit height chain so .sheet-page's
+   height:100% (below) has something real to resolve against -- a
+   percentage height is a no-op against an ancestor whose own height is
+   just "auto" (content-driven). This is what lets the sheet view fill
+   the actual viewport ("make the spreadsheet cells ui fill the window"). */
+html, body { height: 100%; }
+#app { height: 100%; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -173,6 +181,23 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 }
 
 .page { padding: var(--space-3) var(--space-4) var(--space-5); max-width: 1100px; margin: 0 auto; }
+
+/* Sheet view fills the viewport instead of being width/height-capped
+   like the list/login/etc. pages -- Fernando: "make the spreadsheet
+   cells ui fill the window". Chrome (topbar/status-row/tab-nav/toolbar/
+   formula-bar) keeps its natural height; .grid-scroll (below) is the
+   only flexible child, taking flex:1 for whatever's left. overflow:
+   hidden here so the page itself never scrolls -- only .grid-scroll
+   does, internally. */
+.page.sheet-page {
+  max-width: none;
+  margin: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.page.sheet-page > * { flex-shrink: 0; }
 
 .topbar {
   display: flex;
@@ -364,7 +389,16 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   overflow: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
-  max-height: 70vh;
+  /* flex:1 + min-height:0 (not max-height:70vh, the old fixed cap) is
+     what makes this fill exactly the space .sheet-page's other children
+     don't use. min-height:0 overrides the flex-item default of
+     min-height:auto, which would otherwise refuse to let this shrink
+     below its content's natural size and break the fill -- classic
+     flexbox gotcha. flex-shrink is re-enabled here specifically,
+     overriding the blanket flex-shrink:0 set on all of .sheet-page's
+     other (fixed-height chrome) children. */
+  flex: 1 1 auto;
+  min-height: 0;
   max-width: 100%;
   background: var(--color-surface);
 }
@@ -376,6 +410,27 @@ table.grid {
      drag-to-select-a-range from also highlighting text as a side effect. */
   user-select: none;
   -webkit-user-select: none;
+  /* table-layout:fixed makes <colgroup><col style="width:Npx"> a hard
+     constraint instead of a hint. Without this (the previous state --
+     table-layout defaults to "auto"), the browser's auto-layout algorithm
+     redistributes column widths to fit whatever space is available in
+     the containing .grid-scroll instead of respecting the literal pixel
+     values grid.js sets -- that's why growing one column visibly shrank
+     the others ("resizes all other cols to fit in the current view"):
+     the browser was fighting the explicit widths to make everything fit,
+     not honoring them. auto-layout is also inherently more expensive
+     (content-aware sizing across every column on relevant changes),
+     compounding the resize-drag performance issue on top of the
+     per-mousemove DOM-write-count fix from an earlier pass.
+     grid.js keeps this element's own `width` in sync with the sum of all
+     column widths (see _syncTableWidth) so the table can legitimately
+     become wider than .grid-scroll and trigger its existing
+     overflow:auto for horizontal scroll, instead of being squeezed to
+     fit -- table-layout:fixed alone isn't enough without that pairing:
+     with no explicit table width, "fixed" layout still falls back to
+     fitting available space when the intrinsic column-width sum isn't
+     otherwise pinned down. */
+  table-layout: fixed;
 }
 /* No fixed min-width/height here -- column widths come from the
    <colgroup> and row heights from each <tr>'s inline style, both set in
@@ -390,7 +445,15 @@ table.grid th, table.grid td {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Browsers' default table-cell vertical-align is "middle", not "top" --
+     Fernando: "the text should be cut off top left centered" (read as:
+     anchored top-left, clipped rather than growing the cell). Scoped to
+     both th/td here since top-aligned header labels are harmless too;
+     text-align:left is td-only below so column-letter/row-number header
+     labels keep their own (centered) look. */
+  vertical-align: top;
 }
+table.grid td { text-align: left; }
 table.grid td.wrap { white-space: normal; word-break: break-word; }
 table.grid thead th, table.grid tbody th {
   background: var(--color-bg);
@@ -522,15 +585,6 @@ table.grid th { position: relative; }
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius);
   font-size: var(--font-size-sm);
-}
-
-/* Desktop: taller viewport for the "fuller editing experience" the
-   README asks for. Column width / row height are no longer set here --
-   they're colgroup/tr-driven from grid.js (user-resizable), not a CSS
-   breakpoint concern; a fixed min-width/height here would act as a floor
-   and silently block shrinking a column/row below it. */
-@media (min-width: 768px) {
-  .grid-scroll { max-height: 75vh; }
 }
 
 /* Mobile: bigger tap targets, stacked toolbar. */
