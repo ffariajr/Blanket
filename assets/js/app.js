@@ -68,6 +68,20 @@ function formatRelativeTime(date) {
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Single source of truth for "what's the canonical shareable URL for this
+// guid+tab" -- used both to canonicalize the address bar (renderSheet)
+// and to build the Share dialog's "Copy link" button, so the two can
+// never drift apart. `ordinal` matches the resolution rule route() uses
+// to go the other direction (ordinal -> tab): 0-indexed position in the
+// tabs list sorted by `position`, not a literal match against the
+// position column (which has gaps after deletion/reordering).
+function shareUrlForTab(guid, tabs, tabId) {
+  const sorted = tabs.slice().sort((a, b) => a.position - b.position);
+  const ordinal = sorted.findIndex((t) => t.id === tabId);
+  const qs = ordinal >= 0 ? `?tab=${ordinal}` : '';
+  return `${APP_BASE}${guid}${qs}`;
+}
+
 function parseHash() {
   const hash = window.location.hash.replace(/^#\/?/, '');
   return hash.split('/').filter(Boolean);
@@ -281,11 +295,11 @@ async function renderSheet(spreadsheetId, tabId) {
   // guid to rewrite to. `ordinal` is this tab's 0-indexed position in the
   // position-sorted tabs list -- matches the resolution rule route() uses
   // to go the other direction (ordinal -> tab).
-  if (spreadsheet && spreadsheet.guid) {
-    const sorted = tabsRes.tabs.slice().sort((a, b) => a.position - b.position);
-    const ordinal = sorted.findIndex((t) => t.id === tabId);
-    const qs = ordinal >= 0 ? `?tab=${ordinal}` : '';
-    history.replaceState(null, '', `${APP_BASE}${spreadsheet.guid}${qs}`);
+  const shareUrl = (spreadsheet && spreadsheet.guid)
+    ? shareUrlForTab(spreadsheet.guid, tabsRes.tabs, tabId)
+    : null;
+  if (shareUrl) {
+    history.replaceState(null, '', shareUrl);
   }
   const sheetUrl = (tid) => (spreadsheet && spreadsheet.guid)
     ? `#/s/${spreadsheet.guid}/t/${tid}`
@@ -434,7 +448,7 @@ async function renderSheet(spreadsheetId, tabId) {
   const actions = el('div', { class: 'sheet-actions' }, [
     el('button', { class: 'btn btn-secondary btn-small', onclick: () => showRenameSpreadsheet(spreadsheet, reload) }, 'Rename'),
     el('button', { class: 'btn btn-secondary btn-small', onclick: () => showManageTabs(spreadsheetId, tabId, reload) }, 'Manage tabs'),
-    canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showShare(spreadsheetId) }, 'Share') : null,
+    canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showShare(spreadsheetId, shareUrl) }, 'Share') : null,
     el('a', { href: '#/sheets', class: 'btn btn-secondary btn-small' }, 'Exit'),
   ]);
 
@@ -541,7 +555,50 @@ const ACCESS_LEVELS = [
   ['edit', 'Can view and edit'],
 ];
 
-async function showShare(spreadsheetId) {
+// Clipboard write for the "Copy link" button. Clipboard-API-first, same
+// pattern as grid.js's _copySelectionToClipboard -- but unlike that one
+// (which has an in-app clipboard variable to fall back to, since there's
+// something to paste into within the app), the meaningful fallback for a
+// URL is a document.execCommand('copy') off the already-visible,
+// already-selected link input, not an in-app-only construct.
+function copyShareLink(text, inputEl, buttonEl) {
+  const original = buttonEl.textContent;
+  function showCopied() {
+    buttonEl.textContent = 'Copied!';
+    setTimeout(() => { buttonEl.textContent = original; }, 1500);
+  }
+  function selectAndExecCopy() {
+    inputEl.select();
+    inputEl.setSelectionRange(0, inputEl.value.length);
+    try {
+      if (document.execCommand('copy')) showCopied();
+    } catch {
+      /* Nothing more we can do here -- the value is visible and selected
+         for a manual Ctrl+C. */
+    }
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(showCopied, selectAndExecCopy);
+  } else {
+    selectAndExecCopy();
+  }
+}
+
+function buildShareLinkSection(shareUrl) {
+  const fullUrl = window.location.origin + shareUrl;
+  const linkInput = el('input', {
+    type: 'text', readonly: true, value: fullUrl, class: 'share-link-input',
+    onclick: (e) => e.target.select(),
+  });
+  const copyBtn = el('button', { class: 'btn btn-small', type: 'button' }, 'Copy link');
+  copyBtn.addEventListener('click', () => copyShareLink(fullUrl, linkInput, copyBtn));
+  return el('div', { class: 'share-section' }, [
+    el('h3', {}, 'Share this link'),
+    el('div', { class: 'share-link-row' }, [linkInput, copyBtn]),
+  ]);
+}
+
+async function showShare(spreadsheetId, shareUrl) {
   const body = el('div', { class: 'share-body' });
   const error = el('p', { class: 'error hidden' });
 
@@ -618,6 +675,7 @@ async function showShare(spreadsheetId) {
   const dialog = el('div', { class: 'modal' }, [
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'Share'),
+      shareUrl ? buildShareLinkSection(shareUrl) : null,
       error,
       body,
       el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),

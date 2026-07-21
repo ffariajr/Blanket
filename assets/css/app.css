@@ -496,6 +496,15 @@ table.grid th { position: relative; }
 .share-section select { margin-top: var(--space-2); }
 .share-section .inline-form { margin-top: var(--space-2); margin-bottom: 0; }
 
+.share-link-row { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.share-link-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: inherit;
+  color: var(--color-text-muted, inherit);
+}
+.share-link-row .btn { flex: 0 0 auto; }
+
 /* Desktop: taller viewport for the "fuller editing experience" the
    README asks for. Column width / row height are no longer set here --
    they're colgroup/tr-driven from grid.js (user-resizable), not a CSS
