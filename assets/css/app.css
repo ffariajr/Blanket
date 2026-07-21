@@ -276,6 +276,42 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   align-items: center;
 }
 .toolbar-spacer { flex: 1; }
+.toolbar-select {
+  height: 2rem;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+/* Formula bar: classic spreadsheet UX, sits between the toolbar and the
+   grid -- shows/edits the raw value of the current selection. */
+.formula-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.formula-ref {
+  min-width: 3.5rem;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-align: right;
+}
+.formula-input {
+  flex: 1;
+  height: 2rem;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+.formula-input:focus { outline: 2px solid var(--color-accent); outline-offset: -1px; }
 
 /* Floating quick-actions menu for the currently-viewed tab (Export/Import
    CSV, History, Rename) -- positioned in JS relative to its anchor button. */
@@ -341,16 +377,21 @@ table.grid {
   user-select: none;
   -webkit-user-select: none;
 }
+/* No fixed min-width/height here -- column widths come from the
+   <colgroup> and row heights from each <tr>'s inline style, both set in
+   grid.js (default 96px/28px, user-resizable via the drag handles below).
+   A CSS min-width/height here would fight that: table layout treats it as
+   a floor, so a column resized narrower than a leftover CSS min-width
+   would silently refuse to actually shrink in the browser. */
 table.grid th, table.grid td {
   border: 1px solid var(--color-border);
-  min-width: 90px;
-  height: 28px;
   padding: 2px 6px;
   font-size: var(--font-size-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+table.grid td.wrap { white-space: normal; word-break: break-word; }
 table.grid thead th, table.grid tbody th {
   background: var(--color-bg);
   position: sticky;
@@ -365,6 +406,28 @@ table.grid td { cursor: cell; position: relative; }
 table.grid td.selected { outline: 2px solid var(--color-accent); outline-offset: -2px; background: var(--color-accent-bg); }
 table.grid td.bold { font-weight: 700; }
 table.grid td.italic { font-style: italic; }
+table.grid td.underline { text-decoration: underline; }
+
+/* Column/row resize drag handles -- thin invisible strips on the trailing
+   edge of each header cell, widened visually only on hover so they don't
+   clutter a 30-column header by default. */
+table.grid th { position: relative; }
+.col-resize-handle {
+  position: absolute;
+  top: 0; right: -3px; bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 4;
+}
+.col-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
+.row-resize-handle {
+  position: absolute;
+  left: 0; right: 0; bottom: -3px;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 4;
+}
+.row-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
 
 .cell-input {
   width: 100%;
@@ -411,10 +474,12 @@ table.grid td.italic { font-style: italic; }
 .share-section select { margin-top: var(--space-2); }
 .share-section .inline-form { margin-top: var(--space-2); margin-bottom: 0; }
 
-/* Desktop: wider min column width for the "fuller editing experience"
-   the README asks for; mobile keeps columns compact for thumb use. */
+/* Desktop: taller viewport for the "fuller editing experience" the
+   README asks for. Column width / row height are no longer set here --
+   they're colgroup/tr-driven from grid.js (user-resizable), not a CSS
+   breakpoint concern; a fixed min-width/height here would act as a floor
+   and silently block shrinking a column/row below it. */
 @media (min-width: 768px) {
-  table.grid th, table.grid td { min-width: 120px; }
   .grid-scroll { max-height: 75vh; }
 }
 
@@ -422,7 +487,6 @@ table.grid td.italic { font-style: italic; }
 @media (max-width: 767px) {
   .page { padding: var(--space-2) var(--space-3) var(--space-4); }
   .btn, .btn-color { height: 2.5rem; }
-  table.grid th, table.grid td { height: 34px; }
   .topbar h1 { font-size: var(--font-size-lg); }
   .modal-content { padding: var(--space-4); }
 }

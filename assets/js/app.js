@@ -1,5 +1,5 @@
 import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser } from './api.js';
-import { Grid } from './grid.js';
+import { Grid, FONT_FAMILIES, FONT_SIZES } from './grid.js';
 import { TabSocket } from './ws.js';
 
 const root = document.getElementById('app');
@@ -222,7 +222,7 @@ async function renderSheet(spreadsheetId, tabId) {
     : `#/sheets/${spreadsheetId}/tabs/${tid}`;
 
   const readOnly = false; // grid itself doesn't know permissions; server rejects unauthorized writes either way
-  const cells = (current.data && current.data.cells) || {};
+  const docData = current.data || { cells: {} };
   const currentTab = tabsRes.tabs.find((t) => t.id === tabId) || null;
   const reload = () => renderSheet(spreadsheetId, tabId);
 
@@ -245,13 +245,52 @@ async function renderSheet(spreadsheetId, tabId) {
 
   const gridContainer = el('div', { class: 'grid-container' });
   const grid = new Grid(gridContainer, {
-    cells,
+    document: docData,
     readOnly,
+    // grid.js assembles the full-document-shaped patch itself (e.g.
+    // {cells: {...}} or {columnWidths: {...}}) -- that's the wire shape
+    // ws-server/merge_patch.py expects, since new_edit merge-patches
+    // against the WHOLE document, not just the cells dict. Sending a bare
+    // {ref: {...}} patch directly (the previous behavior here) was a real,
+    // previously-undetected bug: it added each cell ref as a top-level
+    // sibling key next to "cells" instead of updating cells[ref], silently
+    // orphaning every live edit made over an active WebSocket session
+    // (confirmed live: a test edit landed as {"A1": {...}, "cells": {}} --
+    // invisible to the app, which only ever reads data.cells). Never
+    // caught before because the WS server isn't wired through Apache in
+    // production yet.
     onChange: (patch) => {
       socket.queueEdit(patch);
       localSaveFallbackTimer();
     },
   });
+
+  // Formula bar: classic spreadsheet UX -- shows/edits the RAW value
+  // (literal or "=formula") of whatever's selected, as an alternative to
+  // typing directly into the cell. Reuses grid.setCellValue -- the exact
+  // same commit path in-cell editing uses, so there's only one place that
+  // decides what "committing a cell edit" means.
+  const formulaRefLabel = el('span', { class: 'formula-ref' }, '');
+  const formulaInput = el('input', {
+    type: 'text', class: 'formula-input', placeholder: 'Select a cell to edit its value or formula',
+    onkeydown: (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); formulaInput.blur(); }
+      else if (e.key === 'Escape') { formulaBar.onSelect(grid.selected); formulaInput.blur(); }
+    },
+    onblur: () => {
+      if (grid.selected && !readOnly) grid.setCellValue(grid.selected, formulaInput.value);
+    },
+  });
+  const formulaBar = {
+    el: el('div', { class: 'formula-bar' }, [formulaRefLabel, formulaInput]),
+    onSelect: (ref) => {
+      formulaRefLabel.textContent = ref || '';
+      if (document.activeElement !== formulaInput) {
+        formulaInput.value = ref && grid.cells[ref] ? (grid.cells[ref].value || '') : '';
+      }
+    },
+  };
+  grid.onSelectionChange = (ref) => formulaBar.onSelect(ref);
 
   const tabNav = el('nav', { class: 'tab-nav' });
   tabsRes.tabs.forEach((t) => {
@@ -273,9 +312,14 @@ async function renderSheet(spreadsheetId, tabId) {
     });
   });
 
+  // Bold/italic/underline/wrap are real TOGGLES now (read the current
+  // selection's format and flip it) -- the old version just always forced
+  // the value on, so there was no way to turn formatting back off from the
+  // toolbar.
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { class: 'btn btn-icon', title: 'Bold', onclick: () => grid.applyFormatToSelection({ bold: true }) }, 'B'),
-    el('button', { class: 'btn btn-icon', title: 'Italic', onclick: () => grid.applyFormatToSelection({ italic: true }) }, 'I'),
+    el('button', { class: 'btn btn-icon', title: 'Bold', onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
+    el('button', { class: 'btn btn-icon', title: 'Italic', onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
+    el('button', { class: 'btn btn-icon', title: 'Underline', onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
     el('input', {
       class: 'btn-color', type: 'color', title: 'Text color',
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
@@ -284,6 +328,35 @@ async function renderSheet(spreadsheetId, tabId) {
       class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff',
       onchange: (e) => grid.applyFormatToSelection({ bg: e.target.value }),
     }),
+    el('select', {
+      class: 'toolbar-select', title: 'Font',
+      onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
+    }, [
+      el('option', { value: '' }, 'Default font'),
+      ...Object.keys(FONT_FAMILIES).map((k) => el('option', { value: k }, k)),
+    ]),
+    el('select', {
+      class: 'toolbar-select', title: 'Font size',
+      onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value || undefined }),
+    }, [
+      el('option', { value: '' }, 'Default size'),
+      ...Object.keys(FONT_SIZES).map((k) => el('option', { value: k }, k)),
+    ]),
+    el('button', { class: 'btn btn-icon', title: 'Wrap text', onclick: () => grid.toggleFormatOnSelection('wrap') }, '⏎'),
+    el('button', {
+      class: 'btn btn-secondary btn-small', title: 'Merge selected cells',
+      onclick: () => {
+        const result = grid.mergeSelection();
+        if (!result.ok) alert(result.error);
+      },
+    }, 'Merge'),
+    el('button', {
+      class: 'btn btn-secondary btn-small', title: 'Unmerge',
+      onclick: () => {
+        const result = grid.unmergeSelection();
+        if (!result.ok) alert(result.error);
+      },
+    }, 'Unmerge'),
     el('div', { class: 'toolbar-spacer' }),
     tabMenuBtn,
   ]);
@@ -303,6 +376,7 @@ async function renderSheet(spreadsheetId, tabId) {
     el('div', { class: 'status-row' }, [connectionEl, savedEl]),
     tabNav,
     toolbar,
+    formulaBar.el,
     gridContainer,
   ]));
 
@@ -319,7 +393,11 @@ async function renderSheet(spreadsheetId, tabId) {
     saveTimer = setTimeout(async () => {
       saveTimer = null;
       try {
-        await api.saveTabState(tabId, { cells: grid.cells }, getDisplayName());
+        await api.saveTabState(
+          tabId,
+          { cells: grid.cells, columnWidths: grid.columnWidths, rowHeights: grid.rowHeights },
+          getDisplayName(),
+        );
         lastSavedAt = new Date();
         renderSavedLabel();
       } catch {
@@ -330,7 +408,7 @@ async function renderSheet(spreadsheetId, tabId) {
 
   const socket = new TabSocket(tabId, {
     onState: (data) => {
-      grid.setCells((data && data.cells) || {});
+      grid.setDocument(data || { cells: {} });
     },
     onRemoteEdit: (patch) => grid.applyRemote(patch),
     onRemoteKeystroke: () => {
@@ -371,7 +449,7 @@ async function showHistory(tabId, grid) {
       onclick: async () => {
         await api.restoreVersion(tabId, h.sequence, getDisplayName());
         const current = await api.currentTabState(tabId);
-        grid.setCells((current.data && current.data.cells) || {});
+        grid.setDocument(current.data || { cells: {} });
         dialog.remove();
       },
     }, 'Restore');
@@ -669,7 +747,7 @@ async function importCsv(tabId, event, grid) {
   const text = await file.text();
   await api.importCsv(tabId, text, getDisplayName());
   const current = await api.currentTabState(tabId);
-  grid.setCells((current.data && current.data.cells) || {});
+  grid.setDocument(current.data || { cells: {} });
   event.target.value = '';
 }
 

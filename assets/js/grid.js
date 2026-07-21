@@ -1,91 +1,182 @@
 // Grid rendering + editing. Fixed-size viewport grid (cols A..AD, 100
 // rows) -- generous for a small church spreadsheet app without needing
-// virtualized/infinite scroll. Sparse cell data: {"A1": {value, format}}.
-import { isFormula, evaluateFormula } from './formulas.js';
+// virtualized/infinite scroll. Sparse cell data: {"A1": {value, format, merge}}.
+import { isFormula, evaluateFormula, colLetter, parseRef } from './formulas.js';
 
 const COLS = 30; // A..AD
 const ROWS = 100;
+const DEFAULT_COL_WIDTH = 96;
+const DEFAULT_ROW_HEIGHT = 28;
+const MIN_COL_WIDTH = 32;
+const MIN_ROW_HEIGHT = 18;
 
-export function colLetter(index) {
-  let letter = '';
-  index++;
-  while (index > 0) {
-    const rem = (index - 1) % 26;
-    letter = String.fromCharCode(65 + rem) + letter;
-    index = Math.floor((index - 1) / 26);
-  }
-  return letter;
-}
+export { colLetter };
 
 export class Grid {
   /**
    * @param {HTMLElement} container
-   * @param {object} opts.cells initial cells dict
-   * @param {(patch: object) => void} opts.onChange called with a merge
-   *   patch (just the changed cell) whenever a cell is edited
+   * @param {object} opts.document {cells, columnWidths, rowHeights} -- the
+   *   full tab document shape (see CELL_SCHEMA.md). columnWidths/
+   *   rowHeights are sparse (col letter / row number -> px override).
+   * @param {(patch: object) => void} opts.onChange called with a
+   *   full-document-shaped merge patch (e.g. {cells: {...}} or
+   *   {columnWidths: {...}}) on any local edit -- this is the wire shape
+   *   ws-server/merge_patch.py expects, and the ONLY place that shape is
+   *   assembled, so callers (app.js) never need to know about it.
    * @param {boolean} opts.readOnly
    */
-  constructor(container, { cells, onChange, readOnly }) {
+  constructor(container, { document: doc, onChange, readOnly }) {
     this.container = container;
-    this.cells = cells || {};
+    doc = doc || {};
+    this.cells = doc.cells || {};
+    this.columnWidths = doc.columnWidths || {};
+    this.rowHeights = doc.rowHeights || {};
     this.onChange = onChange || (() => {});
     this.readOnly = !!readOnly;
-    this.selected = null; // {row, col}
+    this.selected = null; // ref string
     this.anchor = null; // for range selection
     this.editingInput = null;
     this._dragging = false;
+    this._resizing = null; // {kind: 'col'|'row', key, startPx, startSize, el}
+    this.onSelectionChange = null; // set by app.js: (ref) => void, for the formula bar
     // In-app clipboard fallback for when the OS Clipboard API is
     // unavailable (non-secure context, permission denied) -- copy/paste
     // still work within the app itself either way.
     this._internalClipboard = '';
+    // Document-level listeners attach ONCE here, not in _build() -- _build()
+    // now runs repeatedly (merge/unmerge/applyRemote-with-merge each force
+    // a structural rebuild, see applyRemote below), and re-registering
+    // document-level listeners on every rebuild would leak duplicates
+    // (each keypress/paste/mouseup firing once per accumulated rebuild).
+    // Safe to bind once: every handler reads current instance state
+    // (this.table, this.selected, ...) at call time, not at bind time, so
+    // none of them care that this.table gets replaced by later rebuilds.
+    document.addEventListener('mouseup', () => this._onMouseUp());
+    document.addEventListener('keydown', (e) => this._onKeyDown(e));
+    document.addEventListener('paste', (e) => this._onPaste(e));
+    document.addEventListener('copy', (e) => this._onCopy(e));
+    document.addEventListener('mousemove', (e) => this._onResizeMove(e));
+    document.addEventListener('mouseup', () => this._onResizeEnd());
     this._build();
   }
 
-  // Apply a remote merge patch (from another collaborator) without
-  // re-triggering onChange.
-  applyRemote(patch) {
-    for (const [ref, value] of Object.entries(patch)) {
-      if (value === null) delete this.cells[ref];
-      else this.cells[ref] = { ...(this.cells[ref] || {}), ...value };
-      this._renderCell(ref);
-    }
+  // --- Remote state / patches --------------------------------------
+
+  /** Full document replace (e.g. on initial WS "state" message or reload). */
+  setDocument(doc) {
+    doc = doc || {};
+    this.cells = doc.cells || {};
+    this.columnWidths = doc.columnWidths || {};
+    this.rowHeights = doc.rowHeights || {};
+    this._build();
   }
 
-  setCells(cells) {
-    this.cells = cells || {};
-    this._renderAll();
+  /**
+   * Apply a remote merge patch (from another collaborator) -- the same
+   * full-document shape onChange emits, not a bare cell patch. A cell
+   * patch whose value touches `merge` forces a structural rebuild (the
+   * table's actual TD layout depends on which cells are merge-covered);
+   * anything else updates in place.
+   */
+  applyRemote(patch) {
+    let structural = false;
+    if (patch.cells) {
+      for (const [ref, value] of Object.entries(patch.cells)) {
+        if (value === null) {
+          if (this.cells[ref] && this.cells[ref].merge) structural = true;
+          delete this.cells[ref];
+        } else {
+          if (('merge' in value) || (this.cells[ref] && this.cells[ref].merge)) structural = true;
+          this.cells[ref] = { ...(this.cells[ref] || {}), ...value };
+        }
+        if (!structural) this._renderCell(ref);
+      }
+    }
+    if (patch.columnWidths) {
+      for (const [col, width] of Object.entries(patch.columnWidths)) {
+        if (width === null) delete this.columnWidths[col];
+        else this.columnWidths[col] = width;
+      }
+      this._applyColumnWidths();
+    }
+    if (patch.rowHeights) {
+      for (const [row, height] of Object.entries(patch.rowHeights)) {
+        if (height === null) delete this.rowHeights[row];
+        else this.rowHeights[row] = height;
+      }
+      this._applyRowHeights();
+    }
+    if (structural) this._build();
   }
+
+  // --- Build / render -------------------------------------------------
 
   _build() {
+    const prevSelected = this.selected;
+    const prevAnchor = this.anchor;
     this.container.innerHTML = '';
     this.container.className = 'grid-scroll';
     const table = document.createElement('table');
     table.className = 'grid';
     this.table = table;
 
+    this._coverage = this._computeCoverage();
+
+    const colgroup = document.createElement('colgroup');
+    colgroup.appendChild(document.createElement('col')); // row-header column
+    for (let c = 0; c < COLS; c++) {
+      const col = document.createElement('col');
+      col.style.width = (this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH) + 'px';
+      colgroup.appendChild(col);
+    }
+    table.appendChild(colgroup);
+
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
     headRow.appendChild(document.createElement('th'));
     for (let c = 0; c < COLS; c++) {
+      const letter = colLetter(c);
       const th = document.createElement('th');
-      th.textContent = colLetter(c);
+      th.textContent = letter;
+      th.appendChild(this._colResizeHandle(letter));
       headRow.appendChild(th);
     }
     thead.appendChild(headRow);
     table.appendChild(thead);
 
+    // ref -> td, populated while building so _cellEl() below is an O(1)
+    // Map lookup instead of a querySelector scan. With a fixed 30x100 =
+    // 3000-cell grid and _renderAll() (full re-render, on every structural
+    // rebuild -- merge/unmerge/remote-merge-patch, not just initial load)
+    // calling _cellEl() once per cell, querySelector-per-cell is O(cells²)
+    // work every rebuild -- caught this empirically: harmless-looking in a
+    // real browser at this cell count, but pathologically slow under
+    // jsdom's unindexed selector engine during testing (60s+, not just
+    // "a bit slow"), which is a real cost even if browsers hide it better.
+    this._cellElements = new Map();
+
     const tbody = document.createElement('tbody');
     for (let r = 0; r < ROWS; r++) {
+      const rowNum = r + 1;
       const tr = document.createElement('tr');
+      tr.style.height = (this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT) + 'px';
       const rowHead = document.createElement('th');
-      rowHead.textContent = String(r + 1);
+      rowHead.textContent = String(rowNum);
+      rowHead.appendChild(this._rowResizeHandle(rowNum));
       tr.appendChild(rowHead);
       for (let c = 0; c < COLS; c++) {
-        const ref = colLetter(c) + (r + 1);
+        const ref = colLetter(c) + rowNum;
+        if (this._coverage.has(ref)) continue; // reserved by an earlier cell's colspan/rowspan
         const td = document.createElement('td');
         td.dataset.ref = ref;
         td.tabIndex = -1;
+        const merge = this.cells[ref] && this.cells[ref].merge;
+        if (merge) {
+          if (merge.cols > 1) td.colSpan = merge.cols;
+          if (merge.rows > 1) td.rowSpan = merge.rows;
+        }
         tr.appendChild(td);
+        this._cellElements.set(ref, td);
       }
       tbody.appendChild(tr);
     }
@@ -100,19 +191,123 @@ export class Grid {
     // behavior that otherwise kicks in when dragging across table cells
     // (there's no actual DOM text selection API involved in our own
     // range-select, so nothing is lost by suppressing the native one).
+    // table is a fresh element every _build() call, so its own listeners
+    // DO need re-attaching each time (unlike the document-level ones bound
+    // once in the constructor above).
     table.addEventListener('mousedown', (e) => this._onMouseDown(e));
     table.addEventListener('mousemove', (e) => this._onMouseMoveDrag(e));
-    document.addEventListener('mouseup', () => this._onMouseUp());
     table.addEventListener('dblclick', (e) => this._onCellDblClick(e));
-    document.addEventListener('keydown', (e) => this._onKeyDown(e));
-    document.addEventListener('paste', (e) => this._onPaste(e));
-    document.addEventListener('copy', (e) => this._onCopy(e));
 
     this._renderAll();
+
+    // Restore selection across a structural rebuild (merge/unmerge, remote
+    // merge patch, resize) so the user doesn't lose their place.
+    if (prevSelected && this._cellEl(prevSelected)) {
+      this.anchor = prevAnchor && this._cellEl(prevAnchor) ? prevAnchor : prevSelected;
+      this.selected = prevSelected;
+      this._highlightRange(this.anchor, this.selected);
+    }
+  }
+
+  /** ref -> true for every cell covered by another cell's merge (i.e. not the origin). */
+  _computeCoverage() {
+    const covered = new Set();
+    for (const [ref, cell] of Object.entries(this.cells)) {
+      if (!cell || !cell.merge) continue;
+      const { row, col } = parseRef(ref);
+      for (let dr = 0; dr < cell.merge.rows; dr++) {
+        for (let dc = 0; dc < cell.merge.cols; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          covered.add(colLetter(col + dc) + (row + dr + 1));
+        }
+      }
+    }
+    return covered;
+  }
+
+  _isCovered(ref) {
+    return this._coverage.has(ref);
+  }
+
+  _colResizeHandle(letter) {
+    const handle = document.createElement('span');
+    handle.className = 'col-resize-handle';
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._resizing = {
+        kind: 'col', key: letter, startPx: e.clientX,
+        startSize: this.columnWidths[letter] || DEFAULT_COL_WIDTH,
+      };
+    });
+    return handle;
+  }
+
+  _rowResizeHandle(rowNum) {
+    const handle = document.createElement('span');
+    handle.className = 'row-resize-handle';
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._resizing = {
+        kind: 'row', key: rowNum, startPx: e.clientY,
+        startSize: this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT,
+      };
+    });
+    return handle;
+  }
+
+  _onResizeMove(e) {
+    if (!this._resizing) return;
+    const { kind, startPx, startSize } = this._resizing;
+    if (kind === 'col') {
+      const size = Math.max(MIN_COL_WIDTH, startSize + (e.clientX - startPx));
+      this._resizing.liveSize = size;
+      this._applyColumnWidths({ [this._resizing.key]: size });
+    } else {
+      const size = Math.max(MIN_ROW_HEIGHT, startSize + (e.clientY - startPx));
+      this._resizing.liveSize = size;
+      this._applyRowHeights({ [this._resizing.key]: size });
+    }
+  }
+
+  _onResizeEnd() {
+    if (!this._resizing) return;
+    const { kind, key, liveSize } = this._resizing;
+    this._resizing = null;
+    if (liveSize === undefined) return; // mousedown with no movement -- not a real resize
+    if (kind === 'col') {
+      this.columnWidths[key] = liveSize;
+      this.onChange({ columnWidths: { [key]: liveSize } });
+    } else {
+      this.rowHeights[key] = liveSize;
+      this.onChange({ rowHeights: { [key]: liveSize } });
+    }
+  }
+
+  /** overrides: optional {key: px} to apply live during a drag before it's committed to this.columnWidths. */
+  _applyColumnWidths(overrides) {
+    if (!this.table) return;
+    const cols = this.table.querySelectorAll('colgroup col');
+    for (let c = 0; c < COLS; c++) {
+      const letter = colLetter(c);
+      const width = (overrides && overrides[letter]) || this.columnWidths[letter] || DEFAULT_COL_WIDTH;
+      if (cols[c + 1]) cols[c + 1].style.width = width + 'px';
+    }
+  }
+
+  _applyRowHeights(overrides) {
+    if (!this.table) return;
+    const rows = this.table.querySelectorAll('tbody tr');
+    for (let r = 0; r < ROWS; r++) {
+      const rowNum = r + 1;
+      const height = (overrides && overrides[rowNum]) || this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
+      if (rows[r]) rows[r].style.height = height + 'px';
+    }
   }
 
   _cellEl(ref) {
-    return this.table.querySelector(`td[data-ref="${ref}"]`);
+    return this._cellElements.get(ref) || null;
   }
 
   /**
@@ -135,33 +330,40 @@ export class Grid {
 
   _renderAll() {
     for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) this._renderCell(colLetter(c) + (r + 1));
+      for (let c = 0; c < COLS; c++) {
+        const ref = colLetter(c) + (r + 1);
+        if (!this._isCovered(ref)) this._renderCell(ref);
+      }
     }
   }
 
   _renderCell(ref) {
     const el = this._cellEl(ref);
-    if (!el) return;
+    if (!el) return; // covered by a merge, or not yet built -- nothing to render
     const cell = this.cells[ref];
     const raw = cell && cell.value !== undefined ? cell.value : '';
-    el.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._numericOf(r))) : raw;
+    el.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
 
     const fmt = (cell && cell.format) || {};
     el.classList.toggle('bold', !!fmt.bold);
     el.classList.toggle('italic', !!fmt.italic);
+    el.classList.toggle('underline', !!fmt.underline);
+    el.classList.toggle('wrap', !!fmt.wrap);
     el.style.color = fmt.color || '';
     el.style.background = fmt.bg || '';
+    el.style.fontFamily = FONT_FAMILIES[fmt.fontFamily] || '';
+    el.style.fontSize = FONT_SIZES[fmt.fontSize] || '';
   }
 
-  _numericOf(ref) {
+  /** Resolves a ref to its evaluated value (number or string) for use inside another cell's formula. */
+  _resolveRef(ref) {
     const cell = this.cells[ref];
-    if (!cell || cell.value === undefined) return 0;
-    const v = isFormula(cell.value) ? evaluateFormula(cell.value, (r) => this._numericOf(r)) : cell.value;
-    const n = parseFloat(v);
-    return isNaN(n) ? 0 : n;
+    if (!cell || cell.value === undefined) return '';
+    return isFormula(cell.value) ? evaluateFormula(cell.value, (r) => this._resolveRef(r)) : cell.value;
   }
 
   _onMouseDown(e) {
+    if (e.target.closest('.col-resize-handle') || e.target.closest('.row-resize-handle')) return;
     const td = e.target.closest('td');
     if (!td) return;
     // Stop native text-selection/drag-highlight; our own selection
@@ -197,6 +399,7 @@ export class Grid {
     this.selected = ref;
     this._highlightRange(this.anchor, this.selected);
     this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref } }));
+    if (this.onSelectionChange) this.onSelectionChange(ref);
   }
 
   _highlightRange(a, b) {
@@ -208,8 +411,8 @@ export class Grid {
   }
 
   _rangeRefs(a, b) {
-    const pa = this._parseRef(a);
-    const pb = this._parseRef(b);
+    const pa = parseRef(a);
+    const pb = parseRef(b);
     const refs = [];
     for (let r = Math.min(pa.row, pb.row); r <= Math.max(pa.row, pb.row); r++) {
       for (let c = Math.min(pa.col, pb.col); c <= Math.max(pa.col, pb.col); c++) {
@@ -219,15 +422,13 @@ export class Grid {
     return refs;
   }
 
-  _parseRef(ref) {
-    const m = ref.match(/^([A-Z]+)(\d+)$/);
-    let col = 0;
-    for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
-    return { col: col - 1, row: parseInt(m[2], 10) - 1 };
+  /** Same rectangle, minus cells that are merge-covered (no independent identity to format/merge/copy). */
+  _visibleRangeRefs(a, b) {
+    return this._rangeRefs(a, b).filter((ref) => !this._isCovered(ref));
   }
 
   _beginEdit(ref) {
-    if (this.readOnly) return;
+    if (this.readOnly || this._isCovered(ref)) return;
     const el = this._cellEl(ref);
     if (!el) return;
     const current = (this.cells[ref] && this.cells[ref].value) || '';
@@ -260,14 +461,19 @@ export class Grid {
     const { ref, input } = this.editingInput;
     const value = input.value;
     this.editingInput = null;
+    this.setCellValue(ref, value);
+  }
 
+  /** Sets a cell's raw value (literal or "=formula") -- shared by in-cell editing and the formula bar. */
+  setCellValue(ref, value) {
+    if (this.readOnly || this._isCovered(ref)) return;
     const prev = this.cells[ref] || {};
     if (value === '') {
       delete this.cells[ref];
-      this.onChange({ [ref]: null });
+      this.onChange({ cells: { [ref]: null } });
     } else {
       this.cells[ref] = { ...prev, value };
-      this.onChange({ [ref]: { value } });
+      this.onChange({ cells: { [ref]: { value } } });
     }
     this._renderCell(ref);
   }
@@ -285,10 +491,10 @@ export class Grid {
       this._beginEdit(this.selected);
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
-      for (const ref of this._rangeRefs(this.anchor, this.selected)) {
+      for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
         if (this.cells[ref]) {
           delete this.cells[ref];
-          this.onChange({ [ref]: null });
+          this.onChange({ cells: { [ref]: null } });
           this._renderCell(ref);
         }
       }
@@ -309,21 +515,39 @@ export class Grid {
     }
   }
 
+  /** Merged cell landed on by keyboard navigation redirects to its origin -- there's nothing else there to select. */
   _moveSelection(dc, dr) {
-    const p = this._parseRef(this.selected);
-    const col = Math.min(COLS - 1, Math.max(0, p.col + dc));
-    const row = Math.min(ROWS - 1, Math.max(0, p.row + dr));
-    this._select(colLetter(col) + (row + 1), false);
+    const p = parseRef(this.selected);
+    let col = Math.min(COLS - 1, Math.max(0, p.col + dc));
+    let row = Math.min(ROWS - 1, Math.max(0, p.row + dr));
+    let ref = colLetter(col) + (row + 1);
+    if (this._isCovered(ref)) {
+      const origin = this._originOf(ref);
+      if (origin) ref = origin;
+    }
+    this._select(ref, false);
+  }
+
+  _originOf(coveredRef) {
+    for (const [ref, cell] of Object.entries(this.cells)) {
+      if (!cell || !cell.merge) continue;
+      const { row, col } = parseRef(ref);
+      const p = parseRef(coveredRef);
+      if (p.row >= row && p.row < row + cell.merge.rows && p.col >= col && p.col < col + cell.merge.cols) {
+        return ref;
+      }
+    }
+    return null;
   }
 
   // Tab-separated between columns, newline-separated between rows -- the
   // de facto interchange format spreadsheet apps use for clipboard data,
   // so this round-trips with pasting into/from a real spreadsheet app.
   _selectionToTsv() {
-    const refs = this._rangeRefs(this.anchor, this.selected);
+    const refs = this._visibleRangeRefs(this.anchor, this.selected);
     const rows = {};
     for (const ref of refs) {
-      const { row } = this._parseRef(ref);
+      const { row } = parseRef(ref);
       (rows[row] = rows[row] || []).push((this.cells[ref] && this.cells[ref].value) || '');
     }
     return Object.keys(rows).sort((a, b) => a - b).map((r) => rows[r].join('\t')).join('\n');
@@ -331,14 +555,14 @@ export class Grid {
 
   _applyTsvAtSelection(text) {
     if (!text) return;
-    const startCell = this._parseRef(this.selected);
+    const startCell = parseRef(this.selected);
     const lines = text.replace(/\r/g, '').split('\n').filter((l, i, a) => !(i === a.length - 1 && l === ''));
     lines.forEach((line, r) => {
       line.split('\t').forEach((value, c) => {
         const ref = colLetter(startCell.col + c) + (startCell.row + r + 1);
-        if (value === '') return;
+        if (value === '' || this._isCovered(ref)) return;
         this.cells[ref] = { ...(this.cells[ref] || {}), value };
-        this.onChange({ [ref]: { value } });
+        this.onChange({ cells: { [ref]: { value } } });
         this._renderCell(ref);
       });
     });
@@ -373,7 +597,7 @@ export class Grid {
 
   // Native copy/paste events: only fire given an actual browser
   // text/DOM selection or focus in an editable element, which plain cell
-  // clicks never create -- so in practice these rarely trigger. Kept as a
+  // clicks never create here -- so in practice these rarely trigger. Kept as a
   // secondary path (e.g. a real text selection made some other way);
   // Ctrl+C/V is handled directly in _onKeyDown, which is what actually
   // works from a plain cell click.
@@ -395,12 +619,97 @@ export class Grid {
 
   applyFormatToSelection(format) {
     if (this.readOnly || !this.selected) return;
-    for (const ref of this._rangeRefs(this.anchor, this.selected)) {
+    for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
       const prev = this.cells[ref] || {};
       const nextFormat = { ...(prev.format || {}), ...format };
       this.cells[ref] = { ...prev, format: nextFormat };
-      this.onChange({ [ref]: { format: nextFormat } });
+      this.onChange({ cells: { [ref]: { format: nextFormat } } });
       this._renderCell(ref);
     }
   }
+
+  /** Current selection's format, read from the anchor cell -- lets the toolbar show/toggle current state instead of blindly forcing bold/italic/etc. on. */
+  getSelectionFormat() {
+    if (!this.anchor) return {};
+    return (this.cells[this.anchor] && this.cells[this.anchor].format) || {};
+  }
+
+  toggleFormatOnSelection(key) {
+    const current = !!this.getSelectionFormat()[key];
+    this.applyFormatToSelection({ [key]: !current });
+  }
+
+  /**
+   * Merge the selected range into its top-left cell. Refuses (returns
+   * {ok:false}) if the range is a single cell, if any cell in it is
+   * already part of another merge, or if any NON-origin cell has content
+   * -- simplest, safest choice: never silently discard data. The caller
+   * (app.js) surfaces the error; grid.js has no dialog/toast machinery of
+   * its own.
+   */
+  mergeSelection() {
+    if (this.readOnly || !this.anchor || !this.selected) return { ok: false, error: 'Nothing selected' };
+    const refs = this._rangeRefs(this.anchor, this.selected);
+    if (refs.length < 2) return { ok: false, error: 'Select more than one cell to merge' };
+
+    const pa = parseRef(this.anchor);
+    const pb = parseRef(this.selected);
+    const originCol = Math.min(pa.col, pb.col);
+    const originRow = Math.min(pa.row, pb.row);
+    const origin = colLetter(originCol) + (originRow + 1);
+    const cols = Math.abs(pa.col - pb.col) + 1;
+    const rows = Math.abs(pa.row - pb.row) + 1;
+
+    for (const ref of refs) {
+      if (this._isCovered(ref) || (this.cells[ref] && this.cells[ref].merge && ref !== origin)) {
+        return { ok: false, error: 'Selection overlaps an existing merged cell' };
+      }
+      if (ref !== origin && this.cells[ref] && this.cells[ref].value) {
+        return { ok: false, error: 'Merging would discard content in a non-origin cell -- clear it first' };
+      }
+    }
+
+    for (const ref of refs) {
+      if (ref === origin) continue;
+      if (this.cells[ref]) {
+        delete this.cells[ref];
+        this.onChange({ cells: { [ref]: null } });
+      }
+    }
+    const prev = this.cells[origin] || {};
+    this.cells[origin] = { ...prev, merge: { rows, cols } };
+    this.onChange({ cells: { [origin]: { merge: { rows, cols } } } });
+    this._build();
+    return { ok: true };
+  }
+
+  unmergeSelection() {
+    if (this.readOnly || !this.selected) return { ok: false, error: 'Nothing selected' };
+    const origin = this._isCovered(this.selected) ? this._originOf(this.selected) : this.selected;
+    if (!origin || !this.cells[origin] || !this.cells[origin].merge) {
+      return { ok: false, error: 'Selection is not a merged cell' };
+    }
+    const { merge, ...rest } = this.cells[origin];
+    this.cells[origin] = rest;
+    this.onChange({ cells: { [origin]: { merge: null } } });
+    this._build();
+    return { ok: true };
+  }
 }
+
+// Deliberately small, fixed preset lists rather than free-text CSS values
+// (per the "keep it simple" scope for this feature) -- font-family/size
+// pickers offer these labels, format stores the label, rendering maps it
+// to a real CSS value here so the mapping only lives in one place.
+export const FONT_FAMILIES = {
+  sans: 'system-ui, sans-serif',
+  serif: 'Georgia, "Times New Roman", serif',
+  monospace: '"SFMono-Regular", Consolas, monospace',
+};
+
+export const FONT_SIZES = {
+  small: '11px',
+  normal: '13px',
+  large: '16px',
+  xlarge: '20px',
+};
