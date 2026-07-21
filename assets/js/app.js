@@ -1,4 +1,4 @@
-import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser } from './api.js';
+import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser, APP_BASE } from './api.js';
 import { Grid, FONT_FAMILIES, FONT_SIZES } from './grid.js';
 import { TabSocket } from './ws.js';
 
@@ -44,37 +44,107 @@ function formatRelativeTime(date) {
 }
 
 // --- Router -----------------------------------------------------------
+//
+// Canonical, shareable URL for viewing a spreadsheet+tab is a REAL path +
+// query string: `${APP_BASE}<guid>?tab=<ordinal>` (e.g.
+// /blanket/7dcc.../?tab=0) -- Fernando's explicit ask, not a #/s/... hash
+// fragment. `ordinal` is a 0-indexed position into the tabs list sorted
+// by `position` (robust to gaps from deletion/reordering -- NOT a literal
+// match against a tab's stored position column value, which could point
+// at nothing or the wrong tab after edits). Landing on `${APP_BASE}<guid>`
+// with no `?tab=` (e.g. straight off the books-menu list) opens tab 0 --
+// there's no separate "list of tabs" page anymore (removed per Fernando:
+// "remove that tabs list view. it should be books menu > tab 0 open").
+//
+// Hash-based routes (`#/sheets/{id}/tabs/{id}` from the original
+// numeric-id routing, `#/s/<guid>/t/<tabId>` from an earlier fork) still
+// resolve for backward compatibility, then get canonicalized to the real
+// path+query form via history.replaceState inside renderSheet -- see
+// there. Internal navigation links still just use `#/s/<guid>/t/<id>`
+// href's (simplest, and hash-navigation is path-preserving so it doesn't
+// disturb any real path already in the address bar); renderSheet cleans
+// up the address bar to the canonical form immediately after resolving,
+// regardless of which route got it there.
+
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseHash() {
   const hash = window.location.hash.replace(/^#\/?/, '');
   return hash.split('/').filter(Boolean);
 }
 
+// The guid segment currently sitting in the real path, if any (relative
+// to APP_BASE, e.g. pathname `/blanket/7dcc.../` -> `7dcc...`).
+function currentPathGuid() {
+  let rel = window.location.pathname;
+  if (rel.startsWith(APP_BASE)) rel = rel.slice(APP_BASE.length);
+  const seg = rel.replace(/^\/+/, '').split('/')[0];
+  return seg && GUID_RE.test(seg) ? seg : null;
+}
+
+// `?tab=` from the query string -- a non-negative integer ordinal, or
+// null if absent/malformed (treated as "no tab specified" -> tab 0).
+function tabOrdinalFromQuery() {
+  const raw = new URLSearchParams(window.location.search).get('tab');
+  if (raw === null) return null;
+  const n = parseInt(raw, 10);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+// Resolves a 0-indexed ordinal (position in a position-sorted tabs list)
+// to that tab, or null if the spreadsheet has no tabs / the ordinal is
+// out of range. Defaults to ordinal 0 when none is given.
+async function resolveTabByOrdinal(spreadsheetId, ordinal) {
+  const { tabs } = await api.listTabs(spreadsheetId);
+  const sorted = tabs.slice().sort((a, b) => a.position - b.position);
+  return sorted[ordinal ?? 0] || null;
+}
+
 async function route() {
   const parts = parseHash();
+
+  // A hash-based navigation (an internal link click, or the numeric/old
+  // guid-hash forms below) takes priority over -- and clears -- any real
+  // guid path left over in the address bar from a previously-canonicalized
+  // view, so e.g. clicking "Exit" (#/sheets) from
+  // /blanket/<guid>?tab=0#/sheets doesn't get stuck re-resolving the old
+  // guid on this or the next route() call.
+  if (parts.length > 0 && currentPathGuid()) {
+    history.replaceState(null, '', APP_BASE + window.location.hash);
+  }
+
   try {
-    if (parts[0] === 'login' || (parts.length === 0 && !isLoggedIn())) {
+    if (parts.length === 0) {
+      const pathGuid = currentPathGuid();
+      if (pathGuid) {
+        const spreadsheet = await api.getSpreadsheetByGuid(pathGuid);
+        const tab = await resolveTabByOrdinal(spreadsheet.id, tabOrdinalFromQuery());
+        return tab ? renderSheet(spreadsheet.id, tab.id) : renderNoTabs(spreadsheet.id, spreadsheet);
+      }
+      if (!isLoggedIn()) return renderLogin();
+      return renderSheetsList();
+    }
+    if (parts[0] === 'login') {
       return renderLogin();
     }
-    // Canonical, shareable form: #/s/<guid> (tabs list) or
-    // #/s/<guid>/t/<tabId> (a specific tab) -- the URL you're looking at
-    // IS the share link. The numeric-id forms below still work (existing
-    // links/bookmarks keep resolving) but rewrite the address bar to this
-    // form once resolved, via history.replaceState inside
-    // renderSheetTabs/renderSheet -- see there for why.
+    // Legacy hash forms -- still resolve, then renderSheet canonicalizes
+    // the address bar to the real path+query form.
     if (parts[0] === 's' && parts[1] && parts[2] === 't' && parts[3]) {
       const spreadsheet = await api.getSpreadsheetByGuid(parts[1]);
       return renderSheet(spreadsheet.id, parseInt(parts[3], 10));
     }
     if (parts[0] === 's' && parts[1]) {
       const spreadsheet = await api.getSpreadsheetByGuid(parts[1]);
-      return renderSheetTabs(spreadsheet.id);
+      const tab = await resolveTabByOrdinal(spreadsheet.id, null);
+      return tab ? renderSheet(spreadsheet.id, tab.id) : renderNoTabs(spreadsheet.id, spreadsheet);
     }
     if (parts[0] === 'sheets' && parts[1] && parts[2] === 'tabs' && parts[3]) {
       return renderSheet(parseInt(parts[1], 10), parseInt(parts[3], 10));
     }
     if (parts[0] === 'sheets' && parts[1]) {
-      return renderSheetTabs(parseInt(parts[1], 10));
+      const spreadsheetId = parseInt(parts[1], 10);
+      const tab = await resolveTabByOrdinal(spreadsheetId, null);
+      return tab ? renderSheet(spreadsheetId, tab.id) : renderNoTabs(spreadsheetId, null);
     }
     return renderSheetsList();
   } catch (e) {
@@ -88,6 +158,7 @@ async function route() {
 }
 
 window.addEventListener('hashchange', route);
+window.addEventListener('popstate', route);
 
 // --- Views --------------------------------------------------------------
 
@@ -160,41 +231,31 @@ async function renderSheetsList() {
   await refresh();
 }
 
-async function renderSheetTabs(spreadsheetId) {
-  const spreadsheet = await api.getSpreadsheet(spreadsheetId);
-  const { tabs } = await api.listTabs(spreadsheetId);
-
-  // Canonical URL for this view is guid-based -- rewrite the address bar
-  // in place (no navigation/reload, and no hashchange event, so this
-  // can't loop) so that whatever's in the address bar right now is always
-  // the shareable link, per Fernando's request.
-  if (spreadsheet && spreadsheet.guid) {
-    history.replaceState(null, '', `#/s/${spreadsheet.guid}`);
+// No standalone "list of tabs" page anymore (removed per Fernando:
+// "remove that tabs list view. it should be books menu > tab 0 open") --
+// route() always resolves straight to a specific tab's grid. This is
+// only reached for the edge case a spreadsheet has zero tabs yet (e.g.
+// just created from the books menu), where there's no tab 0 to jump to.
+// Reuses the existing "Manage tabs" dialog to create the first one rather
+// than duplicating tab-creation UI here.
+async function renderNoTabs(spreadsheetId, spreadsheet) {
+  if (!spreadsheet) {
+    spreadsheet = await api.getSpreadsheet(spreadsheetId).catch(() => null);
   }
 
-  const list = el('ul', { class: 'tab-list' });
-  for (const t of tabs) {
-    list.appendChild(el('li', {}, el('a', { href: `#/s/${spreadsheet.guid}/t/${t.id}` }, t.name)));
+  function openManageTabs() {
+    showManageTabs(spreadsheetId, null, () => route());
   }
-
-  const newName = el('input', { type: 'text', placeholder: 'New tab name' });
-  const form = el('form', {
-    class: 'inline-form',
-    onsubmit: async (e) => {
-      e.preventDefault();
-      if (!newName.value.trim()) return;
-      const created = await api.createTab(spreadsheetId, newName.value.trim(), getDisplayName());
-      window.location.hash = `#/s/${spreadsheet.guid}/t/${created.id}`;
-    },
-  }, [newName, el('button', { class: 'btn', type: 'submit' }, 'Add tab')]);
 
   mount(el('div', { class: 'page' }, [
     el('header', { class: 'topbar' }, [
       el('a', { href: '#/sheets', class: 'link' }, '← All spreadsheets'),
-      el('h1', {}, spreadsheet.title),
+      el('h1', {}, spreadsheet ? spreadsheet.title : 'Spreadsheet'),
     ]),
-    form,
-    list,
+    el('div', { class: 'centered' }, [
+      el('p', { class: 'muted' }, "This spreadsheet doesn't have any tabs yet."),
+      el('button', { class: 'btn', onclick: openManageTabs }, 'Add a tab'),
+    ]),
   ]));
 }
 
@@ -209,13 +270,22 @@ async function renderSheet(spreadsheetId, tabId) {
     api.currentTabState(tabId),
   ]);
 
-  // Canonical URL for this view is guid-based -- see the matching comment
-  // in renderSheetTabs. spreadsheet can be null here (existing defensive
+  // Canonical, shareable URL for this view: real path + query, per
+  // Fernando's request -- `${APP_BASE}<guid>?tab=<ordinal>`, not a
+  // #/s/<guid>/t/<id> hash. Rewritten here regardless of which route (the
+  // real path itself, or a legacy hash form) actually got us here, so
+  // whatever's in the address bar right now always converges to the
+  // shareable form. spreadsheet can be null here (existing defensive
   // handling above, e.g. a permission edge case where /tabs still loads
   // but /spreadsheets/{id} doesn't) -- only rewrite if we actually have a
-  // guid to rewrite to.
+  // guid to rewrite to. `ordinal` is this tab's 0-indexed position in the
+  // position-sorted tabs list -- matches the resolution rule route() uses
+  // to go the other direction (ordinal -> tab).
   if (spreadsheet && spreadsheet.guid) {
-    history.replaceState(null, '', `#/s/${spreadsheet.guid}/t/${tabId}`);
+    const sorted = tabsRes.tabs.slice().sort((a, b) => a.position - b.position);
+    const ordinal = sorted.findIndex((t) => t.id === tabId);
+    const qs = ordinal >= 0 ? `?tab=${ordinal}` : '';
+    history.replaceState(null, '', `${APP_BASE}${spreadsheet.guid}${qs}`);
   }
   const sheetUrl = (tid) => (spreadsheet && spreadsheet.guid)
     ? `#/s/${spreadsheet.guid}/t/${tid}`

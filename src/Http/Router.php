@@ -47,6 +47,23 @@ final class Router
             exit;
         }
 
+        // SPA history-mode fallback: a real (non-hash) path like
+        // /blanket/<guid>?tab=0 isn't a registered route, isn't a real
+        // static file (those are served directly by Apache/php -S before
+        // this ever runs -- see .htaccess / dev-router.php), and isn't
+        // meant to be one -- it's client-side routing state. Serve the
+        // SPA shell so app.js can read window.location.pathname/search
+        // and render the right view. Scoped to GET and to paths that
+        // don't look like an API call gone wrong, so a typo'd/removed
+        // /api/* route still 404s as JSON instead of confusingly
+        // returning HTML.
+        if (!$matchedPath && $baseRequest->method === 'GET' && !str_starts_with($baseRequest->path, '/api/')) {
+            $shell = dirname(__DIR__, 2) . '/index.html';
+            if (is_file($shell)) {
+                Response::raw((string) file_get_contents($shell), 'text/html; charset=utf-8');
+            }
+        }
+
         Response::error($matchedPath ? 'Method not allowed' : 'Not found', $matchedPath ? 405 : 404);
     }
 }
