@@ -470,6 +470,15 @@ table.grid th, table.grid td {
 }
 table.grid td { text-align: left; }
 table.grid td.wrap { white-space: normal; word-break: break-word; }
+/* Cell text/buttons render inside this wrapper, not the <td> directly --
+   see grid.js _renderCell()'s comment: a <td>'s own explicit height is
+   only a floor in table layout (same as a <tr height>), so overflow:hidden
+   on the <td> itself doesn't reliably clip a large font's natural line
+   box. A normal block child with its own explicit height (set inline per
+   row, see grid.js) has no such table-layout floor semantics -- clips
+   correctly regardless of font size. white-space/word-break/text-overflow
+   are inherited from the td rules above, no need to repeat them here. */
+table.grid .cell-content { display: block; }
 table.grid thead th, table.grid tbody th {
   background: var(--color-bg);
   position: sticky;
