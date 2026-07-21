@@ -45,6 +45,20 @@ async function route() {
     if (parts[0] === 'login' || (parts.length === 0 && !isLoggedIn())) {
       return renderLogin();
     }
+    // Canonical, shareable form: #/s/<guid> (tabs list) or
+    // #/s/<guid>/t/<tabId> (a specific tab) -- the URL you're looking at
+    // IS the share link. The numeric-id forms below still work (existing
+    // links/bookmarks keep resolving) but rewrite the address bar to this
+    // form once resolved, via history.replaceState inside
+    // renderSheetTabs/renderSheet -- see there for why.
+    if (parts[0] === 's' && parts[1] && parts[2] === 't' && parts[3]) {
+      const spreadsheet = await api.getSpreadsheetByGuid(parts[1]);
+      return renderSheet(spreadsheet.id, parseInt(parts[3], 10));
+    }
+    if (parts[0] === 's' && parts[1]) {
+      const spreadsheet = await api.getSpreadsheetByGuid(parts[1]);
+      return renderSheetTabs(spreadsheet.id);
+    }
     if (parts[0] === 'sheets' && parts[1] && parts[2] === 'tabs' && parts[3]) {
       return renderSheet(parseInt(parts[1], 10), parseInt(parts[3], 10));
     }
@@ -107,7 +121,7 @@ async function renderSheetsList() {
     list.textContent = '';
     const { spreadsheets } = await api.listSpreadsheets();
     for (const s of spreadsheets) {
-      const link = el('a', { href: `#/sheets/${s.id}` }, s.title);
+      const link = el('a', { href: s.guid ? `#/s/${s.guid}` : `#/sheets/${s.id}` }, s.title);
       list.appendChild(el('li', {}, link));
     }
   }
@@ -139,9 +153,17 @@ async function renderSheetTabs(spreadsheetId) {
   const spreadsheet = await api.getSpreadsheet(spreadsheetId);
   const { tabs } = await api.listTabs(spreadsheetId);
 
+  // Canonical URL for this view is guid-based -- rewrite the address bar
+  // in place (no navigation/reload, and no hashchange event, so this
+  // can't loop) so that whatever's in the address bar right now is always
+  // the shareable link, per Fernando's request.
+  if (spreadsheet && spreadsheet.guid) {
+    history.replaceState(null, '', `#/s/${spreadsheet.guid}`);
+  }
+
   const list = el('ul', { class: 'tab-list' });
   for (const t of tabs) {
-    list.appendChild(el('li', {}, el('a', { href: `#/sheets/${spreadsheetId}/tabs/${t.id}` }, t.name)));
+    list.appendChild(el('li', {}, el('a', { href: `#/s/${spreadsheet.guid}/t/${t.id}` }, t.name)));
   }
 
   const newName = el('input', { type: 'text', placeholder: 'New tab name' });
@@ -151,7 +173,7 @@ async function renderSheetTabs(spreadsheetId) {
       e.preventDefault();
       if (!newName.value.trim()) return;
       const created = await api.createTab(spreadsheetId, newName.value.trim(), getDisplayName());
-      window.location.hash = `#/sheets/${spreadsheetId}/tabs/${created.id}`;
+      window.location.hash = `#/s/${spreadsheet.guid}/t/${created.id}`;
     },
   }, [newName, el('button', { class: 'btn', type: 'submit' }, 'Add tab')]);
 
@@ -166,17 +188,28 @@ async function renderSheetTabs(spreadsheetId) {
 }
 
 async function renderSheet(spreadsheetId, tabId) {
-  const anonymousNeedsName = !isLoggedIn() && !getDisplayName();
-  if (anonymousNeedsName) {
-    const name = window.prompt('What name should we show next to your edits?', '');
-    if (name && name.trim()) setDisplayName(name.trim());
-  }
+  // Name prompt now happens once at app startup (see promptForNameIfNeeded
+  // / bootstrap at the bottom of this file), not here -- Fernando wants it
+  // on first visit generally, not just when entering a sheet.
 
   const [spreadsheet, tabsRes, current] = await Promise.all([
     api.getSpreadsheet(spreadsheetId).catch(() => null),
     api.listTabs(spreadsheetId),
     api.currentTabState(tabId),
   ]);
+
+  // Canonical URL for this view is guid-based -- see the matching comment
+  // in renderSheetTabs. spreadsheet can be null here (existing defensive
+  // handling above, e.g. a permission edge case where /tabs still loads
+  // but /spreadsheets/{id} doesn't) -- only rewrite if we actually have a
+  // guid to rewrite to.
+  if (spreadsheet && spreadsheet.guid) {
+    history.replaceState(null, '', `#/s/${spreadsheet.guid}/t/${tabId}`);
+  }
+  const sheetUrl = (tid) => (spreadsheet && spreadsheet.guid)
+    ? `#/s/${spreadsheet.guid}/t/${tid}`
+    : `#/sheets/${spreadsheetId}/tabs/${tid}`;
+  const tabsListUrl = (spreadsheet && spreadsheet.guid) ? `#/s/${spreadsheet.guid}` : `#/sheets/${spreadsheetId}`;
 
   const readOnly = false; // grid itself doesn't know permissions; server rejects unauthorized writes either way
   const cells = (current.data && current.data.cells) || {};
@@ -199,7 +232,7 @@ async function renderSheet(spreadsheetId, tabId) {
   tabsRes.tabs.forEach((t) => {
     const isActive = t.id === tabId;
     tabNav.appendChild(el('a', {
-      href: `#/sheets/${spreadsheetId}/tabs/${t.id}`,
+      href: sheetUrl(t.id),
       class: isActive ? 'active' : '',
     }, t.name));
   });
@@ -227,7 +260,7 @@ async function renderSheet(spreadsheetId, tabId) {
 
   mount(el('div', { class: 'page sheet-page' }, [
     el('header', { class: 'topbar' }, [
-      el('a', { href: `#/sheets/${spreadsheetId}`, class: 'link' }, '← Tabs'),
+      el('a', { href: tabsListUrl, class: 'link' }, '← Tabs'),
       el('h1', {}, (spreadsheet && spreadsheet.title) || 'Spreadsheet'),
       statusEl,
     ]),
@@ -420,4 +453,22 @@ function renderError(e) {
   ]));
 }
 
+// Ask an anonymous visitor for a display name once, on first visit to the
+// app generally -- not just when they land inside a specific sheet (the
+// old behavior). Only fires if they're not logged in and don't already
+// have a display-name cookie; never fires again once one's set. Runs
+// before the very first route() so it's the first thing a fresh
+// anonymous visitor sees, on both mobile and desktop.
+function promptForNameIfNeeded() {
+  if (!isLoggedIn() && !getDisplayName()) {
+    // TODO(next UI pass): replace with a small in-app modal to match the
+    // rest of the app's styling -- left as window.prompt() here since a
+    // broader menu/UI overhaul is already planned as separate follow-up
+    // work and will likely revisit this anyway.
+    const name = window.prompt('What name should we show next to your edits?', '');
+    if (name && name.trim()) setDisplayName(name.trim());
+  }
+}
+
+promptForNameIfNeeded();
 route();

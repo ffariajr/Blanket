@@ -85,6 +85,7 @@ export const api = {
   listSpreadsheets: () => request('GET', '/spreadsheets'),
   createSpreadsheet: (title) => request('POST', '/spreadsheets', { title }),
   getSpreadsheet: (id) => request('GET', `/spreadsheets/${id}`),
+  getSpreadsheetByGuid: (guid) => request('GET', `/spreadsheets/guid/${encodeURIComponent(guid)}`),
   renameSpreadsheet: (id, title) => request('PATCH', `/spreadsheets/${id}`, { title }),
   deleteSpreadsheet: (id) => request('DELETE', `/spreadsheets/${id}`),
   purgeSpreadsheet: (id) => request('DELETE', `/spreadsheets/${id}/purge`),

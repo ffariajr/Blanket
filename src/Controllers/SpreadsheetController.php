@@ -57,6 +57,24 @@ final class SpreadsheetController
         Response::json($spreadsheet);
     }
 
+    /** Resolves a guid-based share URL to the full spreadsheet (including its numeric id, for reuse of every id-based endpoint from here on). */
+    public function byGuid(Request $request): void
+    {
+        $user = Authenticator::resolve($request);
+        $guid = (string) $request->params['guid'];
+
+        $spreadsheet = $this->spreadsheets->findByGuid($guid);
+        if ($spreadsheet === null) {
+            Response::error('Not found', 404);
+        }
+
+        if (!$this->permissions->canView($spreadsheet, $user)) {
+            Response::error('Forbidden', 403);
+        }
+
+        Response::json($spreadsheet);
+    }
+
     public function rename(Request $request): void
     {
         $user = Authenticator::resolve($request);

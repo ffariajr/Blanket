@@ -5,17 +5,30 @@ declare(strict_types=1);
 namespace Blanket\Repositories;
 
 use Blanket\Db;
+use Blanket\Support\Uuid;
 
 final class SpreadsheetRepository
 {
-    /** @return array{id:int,owner_id:int,title:string,created_at:string,updated_at:string,deleted_at:?string}|null */
+    /** @return array{id:int,guid:string,owner_id:int,title:string,created_at:string,updated_at:string,deleted_at:?string}|null */
     public function find(int $id): ?array
     {
         $stmt = Db::connection()->prepare(
-            'SELECT id, owner_id, title, created_at, updated_at, deleted_at
+            'SELECT id, guid, owner_id, title, created_at, updated_at, deleted_at
              FROM spreadsheets WHERE id = :id AND deleted_at IS NULL'
         );
         $stmt->execute(['id' => $id]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $this->cast($row);
+    }
+
+    /** @return array{id:int,guid:string,owner_id:int,title:string,created_at:string,updated_at:string,deleted_at:?string}|null */
+    public function findByGuid(string $guid): ?array
+    {
+        $stmt = Db::connection()->prepare(
+            'SELECT id, guid, owner_id, title, created_at, updated_at, deleted_at
+             FROM spreadsheets WHERE guid = :guid AND deleted_at IS NULL'
+        );
+        $stmt->execute(['guid' => $guid]);
         $row = $stmt->fetch();
         return $row === false ? null : $this->cast($row);
     }
@@ -35,7 +48,7 @@ final class SpreadsheetRepository
     public function listForUser(int $userId): array
     {
         $stmt = Db::connection()->prepare(
-            'SELECT DISTINCT s.id, s.owner_id, s.title, s.created_at, s.updated_at, s.deleted_at
+            'SELECT DISTINCT s.id, s.guid, s.owner_id, s.title, s.created_at, s.updated_at, s.deleted_at
              FROM spreadsheets s
              LEFT JOIN spreadsheet_access a ON a.spreadsheet_id = s.id AND a.user_id = :user_id1
              WHERE s.deleted_at IS NULL AND (s.owner_id = :user_id2 OR a.id IS NOT NULL)
@@ -48,9 +61,9 @@ final class SpreadsheetRepository
     public function create(int $ownerId, string $title): int
     {
         $stmt = Db::connection()->prepare(
-            'INSERT INTO spreadsheets (owner_id, title) VALUES (:owner_id, :title)'
+            'INSERT INTO spreadsheets (guid, owner_id, title) VALUES (:guid, :owner_id, :title)'
         );
-        $stmt->execute(['owner_id' => $ownerId, 'title' => $title]);
+        $stmt->execute(['guid' => Uuid::v4(), 'owner_id' => $ownerId, 'title' => $title]);
         return (int) Db::connection()->lastInsertId();
     }
 

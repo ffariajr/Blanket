@@ -30,6 +30,10 @@ $router->add('POST', '/api/login', fn (Request $r) => (new AuthController())->lo
 
 $router->add('GET', '/api/spreadsheets', fn (Request $r) => (new SpreadsheetController())->index($r));
 $router->add('POST', '/api/spreadsheets', fn (Request $r) => (new SpreadsheetController())->create($r));
+// Must be registered before /api/spreadsheets/{id} -- the router matches
+// in registration order and {id}'s pattern ([^/]+) would otherwise treat
+// the literal "guid" as an id.
+$router->add('GET', '/api/spreadsheets/guid/{guid}', fn (Request $r) => (new SpreadsheetController())->byGuid($r));
 $router->add('GET', '/api/spreadsheets/{id}', fn (Request $r) => (new SpreadsheetController())->show($r));
 $router->add('PATCH', '/api/spreadsheets/{id}', fn (Request $r) => (new SpreadsheetController())->rename($r));
 $router->add('DELETE', '/api/spreadsheets/{id}', fn (Request $r) => (new SpreadsheetController())->softDelete($r));
