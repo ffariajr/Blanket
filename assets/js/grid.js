@@ -21,6 +21,17 @@ const DEFAULT_COL_WIDTH = 96;
 const DEFAULT_ROW_HEIGHT = 28;
 const MIN_COL_WIDTH = 32;
 const MIN_ROW_HEIGHT = 18;
+// The row-header <col> (row numbers, leftmost) never had an explicit
+// width -- under table-layout:auto (before the resize-squeeze fix) that
+// was fine, content sized it. Under table-layout:fixed, a <col> with no
+// specified width only gets whatever's left over after every OTHER
+// column's specified width is subtracted from the table's own width --
+// and the table's width was being set to exactly the sum of the data
+// columns alone (_sumColumnWidths), leaving zero left over. The row
+// header column collapsed to ~0px and effectively vanished. Fixed width
+// here, and _sumColumnWidths()/the live-drag width sync both now
+// account for it.
+const ROW_HEADER_WIDTH = 40;
 const MIN_COLS = 1;
 const MIN_ROWS = 1;
 
@@ -175,7 +186,9 @@ export class Grid {
     this._colElements = [];
     this._colHeaderElements = [];
     const colgroup = document.createElement('colgroup');
-    colgroup.appendChild(document.createElement('col')); // row-header column
+    const rowHeaderCol = document.createElement('col');
+    rowHeaderCol.style.width = ROW_HEADER_WIDTH + 'px';
+    colgroup.appendChild(rowHeaderCol);
     for (let c = 0; c < this.cols; c++) {
       const col = document.createElement('col');
       col.style.width = (this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH) + 'px';
@@ -425,7 +438,7 @@ export class Grid {
   }
 
   _sumColumnWidths() {
-    let total = 0;
+    let total = ROW_HEADER_WIDTH;
     for (let c = 0; c < this.cols; c++) total += this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH;
     return total;
   }
@@ -505,18 +518,49 @@ export class Grid {
   _renderCell(ref) {
     const el = this._cellEl(ref);
     if (!el) return; // covered by a merge, or not yet built -- nothing to render
-    el.innerHTML = ''; // clear any previous button/input child left from a prior render
+    el.innerHTML = ''; // clear any previous content/wrapper left from a prior render
     const cell = this.cells[ref];
     const raw = cell && cell.value !== undefined ? cell.value : '';
+
+    // Content goes in an inner wrapper, not directly in the <td>, and
+    // it's this wrapper -- not the <td> -- that gets the explicit
+    // height + overflow:hidden clamp. A <td>'s own `height` is only a
+    // floor in table layout (same reason a <tr height> is, see _build()'s
+    // comment on that) -- a large font-size's natural line box still
+    // grows the row even with overflow:hidden set directly on the <td>,
+    // because the *used* height feeding the table's row-height algorithm
+    // is computed from content before that clip is applied. A normal
+    // block-level child with its own explicit height has no such
+    // table-layout floor semantics -- overflow:hidden on IT reliably
+    // clips regardless of font size, and the <td>'s own natural content
+    // height (what the row-height algorithm actually sees) becomes just
+    // "the wrapper's height", not the raw text's. This is what "changing
+    // font size should not resize cell to fit" needed -- setting
+    // height+overflow on the <td> alone (the previous attempt) looked
+    // right in code and in a DOM-structure test, but never actually
+    // clipped in real table layout.
+    const inner = document.createElement('div');
+    inner.className = 'cell-content';
+    const merge = cell && cell.merge;
+    if (!merge || !merge.rows || merge.rows <= 1) {
+      const { row: rowIdx } = parseRef(ref);
+      const rowHeight = this.rowHeights[rowIdx + 1] || DEFAULT_ROW_HEIGHT;
+      inner.style.height = rowHeight + 'px';
+      inner.style.overflow = 'hidden';
+    }
+    // A rowSpan>1 merge origin: no fixed height here either, matching
+    // _build()'s same skip for the <td> itself -- its natural height is
+    // the sum of the rows it spans.
+    el.appendChild(inner);
 
     // USERINFO is checked before the normal formula evaluator -- see
     // parseUserInfo() in formulas.js for why it can't go through
     // evaluateFormula() like SUM etc.
     const userInfo = parseUserInfo(raw);
     if (userInfo) {
-      this._renderUserInfoCell(ref, el, userInfo);
+      this._renderUserInfoCell(ref, inner, userInfo);
     } else {
-      el.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
+      inner.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
     }
 
     const fmt = (cell && cell.format) || {};
@@ -621,6 +665,15 @@ export class Grid {
   }
 
   _onMouseDown(e) {
+    // Only the left button starts a selection. Without this check, a
+    // middle-click here called preventDefault() and started a drag same
+    // as a left-click -- which also suppresses the browser's native
+    // middle-click autoscroll (that gesture starts on mousedown and is
+    // cancelled by any preventDefault on it), so middle-clicking a cell
+    // silently ate autoscroll and selected the cell instead. Right-click
+    // (button 2) is handled separately by _onContextMenu and must also
+    // not fall through to selection logic here.
+    if (e.button !== 0) return;
     if (e.target.closest('.col-resize-handle') || e.target.closest('.row-resize-handle')) return;
     const td = e.target.closest('td');
     if (!td) return;

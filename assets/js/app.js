@@ -860,8 +860,20 @@ function showTabMenu(anchorEl, { tabId, tabName, grid, onRenamed }) {
         close();
         const name = window.prompt('Rename tab', tabName);
         if (name && name.trim() && name.trim() !== tabName) {
-          await api.renameTab(tabId, name.trim());
-          onRenamed();
+          // Was a bare unhandled `await api.renameTab(...)` with no
+          // try/catch -- since close() already ran, any failure (network
+          // blip, a permission edge case, anything) surfaced as nothing
+          // happening at all, no error, no feedback. Renaming looking
+          // like it silently "doesn't work" is exactly what that
+          // produces. Matches the try/catch + inline alert pattern
+          // already used elsewhere in this file (e.g. showManageTabs'
+          // create-tab handler) rather than inventing a new one.
+          try {
+            await api.renameTab(tabId, name.trim());
+            onRenamed();
+          } catch {
+            window.alert('Could not rename tab (you may not have permission, or the request failed).');
+          }
         }
       },
     }, 'Rename tab'),
@@ -940,9 +952,20 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             disabled: !prev || null,
             onclick: async () => {
               if (!prev) return;
-              await Promise.all([api.reorderTab(t.id, prev.position), api.reorderTab(prev.id, t.position)]);
-              await refresh();
-              onChanged();
+              // Was a bare unhandled await with no try/catch, inconsistent
+              // with Delete below in this same function -- any failure
+              // (e.g. one of the two reorderTab calls in the swap
+              // succeeding and the other failing) surfaced as nothing
+              // happening, no error shown, reordering looking like it
+              // silently "doesn't work".
+              try {
+                await Promise.all([api.reorderTab(t.id, prev.position), api.reorderTab(prev.id, t.position)]);
+                await refresh();
+                onChanged();
+              } catch {
+                error.textContent = 'Could not reorder tabs (you may not have permission).';
+                error.classList.remove('hidden');
+              }
             },
           }, '←'),
           el('button', {
@@ -950,9 +973,14 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             disabled: !next || null,
             onclick: async () => {
               if (!next) return;
-              await Promise.all([api.reorderTab(t.id, next.position), api.reorderTab(next.id, t.position)]);
-              await refresh();
-              onChanged();
+              try {
+                await Promise.all([api.reorderTab(t.id, next.position), api.reorderTab(next.id, t.position)]);
+                await refresh();
+                onChanged();
+              } catch {
+                error.textContent = 'Could not reorder tabs (you may not have permission).';
+                error.classList.remove('hidden');
+              }
             },
           }, '→'),
           el('button', {
@@ -960,9 +988,14 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             onclick: async () => {
               const name = window.prompt('Rename tab', t.name);
               if (name && name.trim() && name.trim() !== t.name) {
-                await api.renameTab(t.id, name.trim());
-                await refresh();
-                onChanged();
+                try {
+                  await api.renameTab(t.id, name.trim());
+                  await refresh();
+                  onChanged();
+                } catch {
+                  error.textContent = 'Could not rename tab (you may not have permission).';
+                  error.classList.remove('hidden');
+                }
               }
             },
           }, 'Rename'),
