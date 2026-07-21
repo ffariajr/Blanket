@@ -11,7 +11,7 @@
       "format": {
         "bold": true, "italic": false, "underline": false,
         "color": "#c00000", "bg": "#ffffff",
-        "fontFamily": "serif", "fontSize": "large", "wrap": true
+        "fontFamily": "serif", "fontSize": 16, "wrap": true
       }
     },
     "C1": { "value": "merged origin", "merge": { "rows": 2, "cols": 3 } },
@@ -41,9 +41,11 @@ a blank cell simply has no key, not an empty entry.
 - `format` (object, optional): `bold`/`italic`/`underline`/`wrap` (bool),
   `color`/`bg` (CSS color string, text/background), `fontFamily` (one of
   the fixed preset keys in `FONT_FAMILIES`, `assets/js/grid.js` — not a
-  free-text CSS value), `fontSize` (one of the fixed preset keys in
-  `FONT_SIZES`, same file). Omit the key entirely, or any of its sub-keys,
-  when not set.
+  free-text CSS value), `fontSize` (a plain number, point size — rendered
+  as `fontSize + 'pt'`; the toolbar restricts input to the common sizes
+  8–72 in `FONT_SIZES`, `assets/js/grid.js`, but any positive number here
+  renders fine if it ever gets here some other way). Omit the key
+  entirely, or any of its sub-keys, when not set.
 - `merge` (object, optional): `{"rows": N, "cols": M}` on the top-left
   ("origin") cell of a merged range. Every other cell covered by that
   range has **no entry at all** in `cells` — merging clears/refuses to

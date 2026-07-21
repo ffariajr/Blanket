@@ -318,7 +318,16 @@ async function renderSheet(spreadsheetId, tabId) {
   // disconnected word top right?"). Both auto-save paths (WS server-side
   // debounce, and the REST fallback below) already save without a manual
   // trigger -- this just surfaces when that last happened.
-  const connectionEl = el('span', { class: 'status-dot status-connecting' }, 'Connecting…');
+  // title = a tooltip explaining what the word means -- Fernando asked
+  // "what is the offline indicator?" even after an earlier pass relabeled
+  // it from a bare ambiguous word ("disconnected") to Live/Connecting/
+  // Offline; the label alone still isn't self-explanatory without this.
+  const STATUS_TOOLTIPS = {
+    live: 'Real-time collaboration is connected -- other people editing this tab see your changes immediately.',
+    connecting: 'Connecting to real-time collaboration...',
+    offline: "Real-time collaboration isn't connected right now, but your changes are still being saved automatically -- you're just not seeing other editors live.",
+  };
+  const connectionEl = el('span', { class: 'status-dot status-connecting', title: STATUS_TOOLTIPS.connecting }, 'Connecting…');
   const savedEl = el('span', { class: 'status-saved' }, '');
   let lastSavedAt = current.created_at ? new Date(current.created_at.replace(' ', 'T') + 'Z') : null;
   function renderSavedLabel() {
@@ -401,9 +410,9 @@ async function renderSheet(spreadsheetId, tabId) {
   // the value on, so there was no way to turn formatting back off from the
   // toolbar.
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { class: 'btn btn-icon', title: 'Bold', onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
-    el('button', { class: 'btn btn-icon', title: 'Italic', onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
-    el('button', { class: 'btn btn-icon', title: 'Underline', onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
     el('input', {
       class: 'btn-color', type: 'color', title: 'Text color',
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
@@ -421,12 +430,12 @@ async function renderSheet(spreadsheetId, tabId) {
     ]),
     el('select', {
       class: 'toolbar-select', title: 'Font size',
-      onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value || undefined }),
+      onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),
     }, [
       el('option', { value: '' }, 'Default size'),
-      ...Object.keys(FONT_SIZES).map((k) => el('option', { value: k }, k)),
+      ...FONT_SIZES.map((size) => el('option', { value: String(size) }, String(size))),
     ]),
-    el('button', { class: 'btn btn-icon', title: 'Wrap text', onclick: () => grid.toggleFormatOnSelection('wrap') }, '⏎'),
+    el('button', { class: 'btn btn-secondary', title: 'Wrap text', onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
     el('button', {
       class: 'btn btn-secondary btn-small', title: 'Merge selected cells',
       onclick: () => {
@@ -507,8 +516,10 @@ async function renderSheet(spreadsheetId, tabId) {
       // doing the saving instead -- editing still works either way, so
       // this is never "saving disabled", just "not live right now".
       const live = status === 'connected';
-      connectionEl.className = 'status-dot ' + (live ? 'status-live' : status === 'connecting' ? 'status-connecting' : 'status-offline');
+      const state = live ? 'live' : status === 'connecting' ? 'connecting' : 'offline';
+      connectionEl.className = 'status-dot status-' + state;
       connectionEl.textContent = live ? 'Live' : status === 'connecting' ? 'Connecting…' : 'Offline';
+      connectionEl.title = STATUS_TOOLTIPS[state];
     },
   });
   socket.connect();
@@ -529,7 +540,7 @@ async function showHistory(tabId, grid) {
   for (const h of history) {
     const label = `#${h.sequence} — ${h.saved_by_name || 'Anonymous'} — ${h.created_at}`;
     const btn = el('button', {
-      class: 'btn btn-small',
+      class: 'btn btn-secondary btn-small',
       onclick: async () => {
         await api.restoreVersion(tabId, h.sequence, getDisplayName());
         const current = await api.currentTabState(tabId);
