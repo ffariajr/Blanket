@@ -7,6 +7,7 @@ export const API_BASE = APP_BASE.replace(/\/$/, '') + '/api';
 
 const TOKEN_KEY = 'blanket_token';
 const NAME_KEY = 'blanket_display_name';
+const USERINFO_EMAIL_KEY = 'blanket_userinfo_email';
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -51,6 +52,41 @@ export function getCurrentUser() {
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Resolves the viewer's own value for a USERINFO() field (see
+ * CELL_SCHEMA.md). "name" deliberately reuses getCurrentUser()/
+ * getDisplayName() above -- the same identity already used for save
+ * attribution and the first-visit name prompt, not a second source of
+ * truth. "email" has no account-level source available client-side (the
+ * JWT doesn't carry it, and there's no "fetch my own profile" endpoint),
+ * so it's cookie-only -- that's also the field USERINFO's autoSaveToCookie
+ * is actually for.
+ */
+export function getUserInfoField(field) {
+  if (field === 'name') {
+    const user = getCurrentUser();
+    return (user && user.displayName) || getDisplayName() || '';
+  }
+  if (field === 'email') {
+    const m = document.cookie.match(/(?:^|; )blanket_userinfo_email=([^;]*)/);
+    return m ? decodeURIComponent(m[1]) : localStorage.getItem(USERINFO_EMAIL_KEY) || '';
+  }
+  return '';
+}
+
+/** Persists a USERINFO field value for reuse elsewhere. "name" writes through setDisplayName (same cookie, one identity). */
+export function setUserInfoField(field, value) {
+  if (field === 'name') {
+    setDisplayName(value);
+    return;
+  }
+  if (field === 'email') {
+    localStorage.setItem(USERINFO_EMAIL_KEY, value);
+    const oneYear = 365 * 24 * 60 * 60;
+    document.cookie = `blanket_userinfo_email=${encodeURIComponent(value)}; path=${APP_BASE}; max-age=${oneYear}; samesite=lax`;
   }
 }
 

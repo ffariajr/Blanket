@@ -21,6 +21,70 @@ export function isFormula(value) {
 }
 
 /**
+ * Parses `=USERINFO(buttonLabel, field[, autoSaveToCookie])` specifically.
+ * Unlike every other function in this file, USERINFO doesn't reduce to a
+ * plain number|string (it changes cell *rendering* -- button vs. plain
+ * input -- with side effects tied to the viewer's identity, not spreadsheet
+ * data), so it can't go through evaluateFormula()'s Parser/applyFunction
+ * path, which only ever returns scalars. grid.js checks this FIRST and
+ * only falls through to evaluateFormula() for everything else -- see
+ * CELL_SCHEMA.md.
+ *
+ * Reuses the same tokenize() everything else here uses, so quoted string
+ * args parse identically to any other function call (whitespace, escaping
+ * quirks, etc. all shared) -- it just extracts the raw args instead of
+ * computing a result from them. USERINFO's arguments are always literal
+ * strings/booleans, never expressions/refs/ranges, so this doesn't need
+ * the full Parser, just a flat walk of the same token stream.
+ *
+ * @returns {{buttonLabel: string, field: string, autoSaveToCookie: boolean}|null}
+ *   null if `formula` isn't a well-formed USERINFO(...) call -- grid.js
+ *   falls through to the normal formula evaluator (which will itself
+ *   produce #ERROR for a bare `=USERINFO(...)` used incorrectly, e.g.
+ *   nested inside another function -- USERINFO is intentionally not in
+ *   RANGE_FNS/SCALAR_FNS below, so that's already the correct behavior).
+ */
+export function parseUserInfo(formula) {
+  if (!isFormula(formula)) return null;
+  let tokens;
+  try {
+    tokens = tokenize(formula.slice(1));
+  } catch {
+    return null;
+  }
+  if (tokens.length < 4) return null;
+  if (tokens[0].type !== 'IDENT' || tokens[0].name !== 'USERINFO') return null;
+  if (tokens[1].type !== 'OP' || tokens[1].value !== '(') return null;
+
+  const args = [];
+  let i = 2;
+  let expectComma = false;
+  for (; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.type === 'OP' && t.value === ')') { i++; break; }
+    if (expectComma) {
+      if (t.type !== 'OP' || t.value !== ',') return null;
+      expectComma = false;
+      continue;
+    }
+    if (t.type === 'STRING') { args.push(t.value); expectComma = true; continue; }
+    if (t.type === 'IDENT' && (t.name === 'TRUE' || t.name === 'FALSE')) {
+      args.push(t.name === 'TRUE'); expectComma = true; continue;
+    }
+    return null; // a ref/range/number/nested call -- not a valid USERINFO arg
+  }
+  if (i !== tokens.length) return null; // trailing garbage after the closing paren
+  if (args.length < 2 || args.length > 3) return null;
+  if (typeof args[0] !== 'string' || typeof args[1] !== 'string') return null;
+
+  return {
+    buttonLabel: args[0],
+    field: args[1],
+    autoSaveToCookie: args.length > 2 ? !!args[2] : false,
+  };
+}
+
+/**
  * @param {string} formula e.g. "=SUM(A1:A5)" or "=IF(A1>10,\"big\",\"small\")"
  * @param {(ref: string) => (number|string)} resolveRef resolves a cell ref
  *   to its current evaluated value (0 if blank/non-numeric-and-non-string

@@ -1,7 +1,8 @@
 // Grid rendering + editing. Fixed-size viewport grid (cols A..AD, 100
 // rows) -- generous for a small church spreadsheet app without needing
 // virtualized/infinite scroll. Sparse cell data: {"A1": {value, format, merge}}.
-import { isFormula, evaluateFormula, colLetter, parseRef } from './formulas.js';
+import { isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo } from './formulas.js';
+import { getUserInfoField, setUserInfoField } from './api.js';
 
 const COLS = 30; // A..AD
 const ROWS = 100;
@@ -340,9 +341,19 @@ export class Grid {
   _renderCell(ref) {
     const el = this._cellEl(ref);
     if (!el) return; // covered by a merge, or not yet built -- nothing to render
+    el.innerHTML = ''; // clear any previous button/input child left from a prior render
     const cell = this.cells[ref];
     const raw = cell && cell.value !== undefined ? cell.value : '';
-    el.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
+
+    // USERINFO is checked before the normal formula evaluator -- see
+    // parseUserInfo() in formulas.js for why it can't go through
+    // evaluateFormula() like SUM etc.
+    const userInfo = parseUserInfo(raw);
+    if (userInfo) {
+      this._renderUserInfoCell(ref, el, userInfo);
+    } else {
+      el.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
+    }
 
     const fmt = (cell && cell.format) || {};
     el.classList.toggle('bold', !!fmt.bold);
@@ -353,6 +364,89 @@ export class Grid {
     el.style.background = fmt.bg || '';
     el.style.fontFamily = FONT_FAMILIES[fmt.fontFamily] || '';
     el.style.fontSize = FONT_SIZES[fmt.fontSize] || '';
+  }
+
+  /**
+   * Renders a cell whose raw value parsed as a USERINFO(...) call (see
+   * parseUserInfo() in formulas.js and CELL_SCHEMA.md for the full design).
+   *
+   * buttonLabel non-empty -> button mode: a clickable button, resolved
+   * on click via _resolveUserInfoButton -- a ONE-SHOT conversion to a
+   * plain literal value (this.cells[ref] no longer holds a USERINFO
+   * formula afterward, ever again for this cell).
+   *
+   * buttonLabel empty -> plain-cell mode: NOT one-shot in the same way,
+   * because autoSaveToCookie needs to keep syncing on every future edit,
+   * not just the first. So instead of collapsing straight to a bare
+   * literal, this converts (still just once, the first time this cell is
+   * ever rendered) to a durable {value, userinfo: {field, autoSaveToCookie}}
+   * shape -- an ordinary editable cell from here on, except setCellValue()
+   * below checks for that lingering `userinfo` marker on every future edit
+   * to keep the cookie in sync. Deliberately mutates this.cells[ref]
+   * directly (same as evaluateFormula's callers never do, but USERINFO
+   * always needs to, per the one-shot-conversion design) -- that mutation
+   * IS what prevents this from re-firing on every later render/rebuild:
+   * once cell.value is a plain string, parseUserInfo() on it returns null
+   * immediately (isFormula() fails first), so this method never runs
+   * again for that ref.
+   *
+   * Firing this.onChange() from inside a render method is unusual (nothing
+   * else here has render-time side effects) but necessary: without
+   * persisting the resolution, reloading the page would just show the raw
+   * =USERINFO(...) formula again, since nothing was ever saved.
+   */
+  _renderUserInfoCell(ref, el, { buttonLabel, field, autoSaveToCookie }) {
+    if (buttonLabel !== '') {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'userinfo-btn';
+      btn.textContent = buttonLabel;
+      btn.disabled = this.readOnly;
+      btn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't start a drag-select under the button
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._resolveUserInfoButton(ref, field);
+      });
+      el.appendChild(btn);
+      return;
+    }
+
+    if (this.readOnly) {
+      // Can't write the resolution back, so just show whatever's
+      // resolvable for display without persisting anything.
+      el.textContent = autoSaveToCookie ? getUserInfoField(field) : '';
+      return;
+    }
+
+    const cookieValue = autoSaveToCookie ? getUserInfoField(field) : '';
+    const nextCell = autoSaveToCookie
+      ? { value: cookieValue, userinfo: { field, autoSaveToCookie: true } }
+      : { value: '' };
+    this.cells[ref] = nextCell;
+    el.textContent = nextCell.value;
+    this.onChange({ cells: { [ref]: nextCell } });
+  }
+
+  /**
+   * Button-mode click: resolve `field` for the current viewer and commit
+   * it as the cell's new literal value via the normal setCellValue() path
+   * (same commit path as typing/formula-bar/paste -- not a parallel one).
+   * If unresolvable (e.g. an anonymous viewer, field="email", no cookie
+   * yet), prompts inline -- consistent with the existing first-visit name
+   * prompt pattern elsewhere in this app -- and stores what they enter for
+   * reuse by other USERINFO cells.
+   */
+  _resolveUserInfoButton(ref, field) {
+    if (this.readOnly) return;
+    let value = getUserInfoField(field);
+    if (!value) {
+      const label = field === 'email' ? 'Your email address' : 'Your name';
+      const entered = window.prompt(label);
+      if (!entered || !entered.trim()) return; // cancelled/blank -- leave the button as it was
+      value = entered.trim();
+      setUserInfoField(field, value);
+    }
+    this.setCellValue(ref, value);
   }
 
   /** Resolves a ref to its evaluated value (number or string) for use inside another cell's formula. */
@@ -464,7 +558,17 @@ export class Grid {
     this.setCellValue(ref, value);
   }
 
-  /** Sets a cell's raw value (literal or "=formula") -- shared by in-cell editing and the formula bar. */
+  /**
+   * Sets a cell's raw value (literal or "=formula") -- shared by in-cell
+   * editing, the formula bar, paste, and USERINFO button-click resolution,
+   * so anything that changes a cell's value goes through one place.
+   *
+   * If the cell carries `userinfo: {field, autoSaveToCookie: true}` (set
+   * once by _renderUserInfoCell's plain-mode conversion -- see there for
+   * why that state has to persist rather than being one-shot), every
+   * future edit to it also re-syncs the field's cookie, so e.g. correcting
+   * a mistyped email keeps the remembered value current too.
+   */
   setCellValue(ref, value) {
     if (this.readOnly || this._isCovered(ref)) return;
     const prev = this.cells[ref] || {};
@@ -474,6 +578,9 @@ export class Grid {
     } else {
       this.cells[ref] = { ...prev, value };
       this.onChange({ cells: { [ref]: { value } } });
+      if (prev.userinfo && prev.userinfo.autoSaveToCookie) {
+        setUserInfoField(prev.userinfo.field, value);
+      }
     }
     this._renderCell(ref);
   }
@@ -491,6 +598,11 @@ export class Grid {
       this._beginEdit(this.selected);
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
+      // Deliberately doesn't route through setCellValue()/its userinfo-
+      // cookie-sync hook: clearing a cell isn't "the user typed a new
+      // value" for that field, and syncing an empty string would erase
+      // their remembered email/name just because they cleared one cell
+      // that happened to display it -- worse than not syncing at all.
       for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
         if (this.cells[ref]) {
           delete this.cells[ref];
@@ -553,6 +665,11 @@ export class Grid {
     return Object.keys(rows).sort((a, b) => a - b).map((r) => rows[r].join('\t')).join('\n');
   }
 
+  // Routes through setCellValue() (used to inline the same three lines
+  // directly) so paste picks up the userinfo-cookie-sync hook there for
+  // free instead of silently bypassing it -- pasting a new value into a
+  // tracked cell is still "editing that cell going forward" per
+  // CELL_SCHEMA.md's USERINFO semantics, same as typing or the formula bar.
   _applyTsvAtSelection(text) {
     if (!text) return;
     const startCell = parseRef(this.selected);
@@ -561,9 +678,7 @@ export class Grid {
       line.split('\t').forEach((value, c) => {
         const ref = colLetter(startCell.col + c) + (startCell.row + r + 1);
         if (value === '' || this._isCovered(ref)) return;
-        this.cells[ref] = { ...(this.cells[ref] || {}), value };
-        this.onChange({ cells: { [ref]: { value } } });
-        this._renderCell(ref);
+        this.setCellValue(ref, value);
       });
     });
   }
