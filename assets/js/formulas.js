@@ -106,7 +106,14 @@ export function evaluateFormula(formula, resolveRef) {
 
 // --- Tokenizer ---------------------------------------------------------
 
-const REF_RE = /^[A-Z]+\d+/;
+// Optional '$' before the column letters and/or before the row digits,
+// independently -- A1, $A1, A$1, $A$1 all match. The '$' is stripped
+// before the ref/start/end fields below are ever used for resolution
+// (evaluateFormula/resolveRef), so a $-locked reference evaluates
+// identically to its unlocked form -- '$' only affects
+// shiftFormulaReferences() below (copy/paste), never a computed value.
+const REF_RE = /^\$?[A-Z]+\$?\d+/;
+const RANGE_END_RE = /^:(\$?[A-Z]+\$?\d+)/i;
 const IDENT_RE = /^[A-Z][A-Z0-9_]*/i;
 const NUMBER_RE = /^\d+(\.\d+)?/;
 
@@ -132,16 +139,18 @@ function tokenize(src) {
       continue;
     }
     if ((m = rest.match(REF_RE))) {
-      const ref = m[0].toUpperCase();
+      const raw = m[0];
+      const ref = raw.replace(/\$/g, '').toUpperCase();
       // Range: REF ':' REF, consumed as one RANGE token.
-      const after = rest.slice(m[0].length);
-      const rangeMatch = after.match(/^:([A-Z]+\d+)/i);
+      const after = rest.slice(raw.length);
+      const rangeMatch = after.match(RANGE_END_RE);
       if (rangeMatch) {
-        tokens.push({ type: 'RANGE', start: ref, end: rangeMatch[1].toUpperCase() });
-        i += m[0].length + rangeMatch[0].length;
+        const end = rangeMatch[1].replace(/\$/g, '').toUpperCase();
+        tokens.push({ type: 'RANGE', start: ref, end });
+        i += raw.length + rangeMatch[0].length;
       } else {
         tokens.push({ type: 'REF', ref });
-        i += m[0].length;
+        i += raw.length;
       }
       continue;
     }
@@ -369,6 +378,73 @@ export function colLetter(index) {
     index = Math.floor((index - 1) / 26);
   }
   return letter;
+}
+
+/**
+ * Excel-style copy/paste reference shifting. When a formula is copied from
+ * one cell and pasted into another, every reference in it shifts by the
+ * (column, row) delta between source and destination -- except any
+ * component locked with '$', which stays fixed. '$' has zero effect on
+ * evaluation (see the REF_RE comment above); this is the only place it
+ * matters.
+ *
+ * Worked example: copying `=CONCAT($A1, A$3, B4)` from C5 to D6 (delta:
+ * +1 col, +1 row) produces `=CONCAT($A2, B$3, C5)` -- $A1's column is
+ * locked (stays A) but its row is relative (1->2); A$3's column is
+ * relative (A->B) but its row is locked (stays 3); B4 is fully relative
+ * (->C5).
+ *
+ * Scans the formula text directly (not the token stream) so every other
+ * character -- operators, function names, number literal formatting,
+ * whitespace -- is preserved byte-for-byte; only REF-shaped substrings
+ * outside string literals are touched. Matches the exact same
+ * letters+digits pattern the tokenizer treats as a ref, so this can never
+ * disagree with how the formula actually parses. If any reference would
+ * shift before column A or row 1, the whole formula becomes `=#REF!`,
+ * matching Excel (a formula referencing a cell that no longer exists is
+ * entirely invalid, not just that one argument).
+ *
+ * @param {string} formula
+ * @param {number} deltaCols
+ * @param {number} deltaRows
+ * @returns {string} unchanged if `formula` isn't a formula, or has no
+ *   references, or deltaCols/deltaRows are both 0.
+ */
+export function shiftFormulaReferences(formula, deltaCols, deltaRows) {
+  if (!isFormula(formula)) return formula;
+  const body = formula.slice(1);
+  let out = '';
+  let i = 0;
+  let refError = false;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"') {
+      const end = body.indexOf('"', i + 1);
+      const stop = end === -1 ? body.length : end + 1;
+      out += body.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    const rest = body.slice(i);
+    const m = rest.match(/^(\$?)([A-Z]+)(\$?)(\d+)/i);
+    if (m) {
+      const [full, colDollar, letters, rowDollar, digits] = m;
+      const { col, row } = parseRef(letters.toUpperCase() + digits);
+      const newCol = colDollar ? col : col + deltaCols;
+      const newRow = rowDollar ? row : row + deltaRows;
+      if (newCol < 0 || newRow < 0) {
+        refError = true;
+        out += full;
+      } else {
+        out += `${colDollar}${colLetter(newCol)}${rowDollar}${newRow + 1}`;
+      }
+      i += full.length;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return refError ? '=#REF!' : '=' + out;
 }
 
 export function expandRange(startRef, endRef) {

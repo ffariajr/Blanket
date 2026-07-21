@@ -374,8 +374,12 @@ async function renderSheet(spreadsheetId, tabId) {
       if (grid.selected && !readOnly) grid.setCellValue(grid.selected, formulaInput.value);
     },
   });
+  const formulaHelpBtn = el('button', {
+    class: 'btn btn-secondary btn-icon', type: 'button', title: 'Formula help',
+    onclick: () => showFormulaHelp(),
+  }, '?');
   const formulaBar = {
-    el: el('div', { class: 'formula-bar' }, [formulaRefLabel, formulaInput]),
+    el: el('div', { class: 'formula-bar' }, [formulaRefLabel, formulaInput, formulaHelpBtn]),
     onSelect: (ref) => {
       formulaRefLabel.textContent = ref || '';
       if (document.activeElement !== formulaInput) {
@@ -607,6 +611,48 @@ function buildShareLinkSection(shareUrl) {
     el('h3', {}, 'Share this link'),
     el('div', { class: 'share-link-row' }, [linkInput, copyBtn]),
   ]);
+}
+
+// Documents exactly what's implemented in formulas.js -- kept next to it
+// deliberately isn't possible (different file/language layer: this is UI,
+// formulas.js is the engine), so this list is manually kept in sync. Every
+// example here is cross-checked against the real evaluator in
+// test-refs.mjs; if you add/change a function, update both.
+const FORMULA_HELP = [
+  { name: 'SUM(range)', desc: 'Adds the numeric values in a range.', example: '=SUM(A1:A5)' },
+  { name: 'AVG(range)', desc: 'Average of the numeric values in a range.', example: '=AVG(A1:A5)' },
+  { name: 'MIN(range)', desc: 'Smallest numeric value in a range.', example: '=MIN(A1:A5)' },
+  { name: 'MAX(range)', desc: 'Largest numeric value in a range.', example: '=MAX(A1:A5)' },
+  { name: 'COUNT(range)', desc: 'Count of numeric values in a range.', example: '=COUNT(A1:A5)' },
+  { name: 'COUNTA(range)', desc: 'Count of non-empty cells in a range (numbers or text).', example: '=COUNTA(A1:A5)' },
+  { name: 'ROUND(value, digits)', desc: 'Rounds a value to the given number of decimal digits.', example: '=ROUND(3.14159, 2)' },
+  { name: 'ABS(value)', desc: 'Absolute value.', example: '=ABS(-5)' },
+  { name: 'IF(condition, then, else)', desc: 'condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
+  { name: 'CONCAT(...) / CONCATENATE(...)', desc: 'Joins any number of values into one piece of text.', example: '=CONCAT(A1, " ", B1)' },
+  { name: 'USERINFO(buttonLabel, field[, autoSaveToCookie])', desc: 'Not a computed function -- turns the cell into a self-service sign-up button (non-empty buttonLabel, fills in the clicker’s info on click) or a cookie-remembering input (empty buttonLabel, autoSaveToCookie=true). field: "name" or "email".', example: '=USERINFO("Sign Up", "name")' },
+];
+
+function showFormulaHelp() {
+  const dialog = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-content modal-content-wide' }, [
+      el('h2', {}, 'Formulas'),
+      el('p', { class: 'muted' }, 'Start a cell with = to enter a formula. Basic arithmetic (+ - * /) and comparisons (= <> < > <= >=) work directly on cell references and numbers, e.g. =A1+B1*2.'),
+      el('div', { class: 'formula-help-list' }, FORMULA_HELP.map((f) => el('div', { class: 'formula-help-item' }, [
+        el('code', {}, f.name),
+        el('p', {}, f.desc),
+        el('code', { class: 'formula-help-example' }, f.example),
+      ]))),
+      el('h3', {}, 'Cell references'),
+      el('p', {}, [
+        'A plain reference like ', el('code', {}, 'A1'), ' shifts when a formula is copied to a new cell, just like Excel/Sheets. Lock a column and/or row with ',
+        el('code', {}, '$'), ' so it stays fixed instead: ', el('code', {}, '$A1'), ' (column locked), ',
+        el('code', {}, 'A$1'), ' (row locked), ', el('code', {}, '$A$1'), ' (both locked).',
+      ]),
+      el('p', { class: 'muted' }, 'Example: copying =CONCAT($A1, A$3, B4) from C5 to D6 becomes =CONCAT($A2, B$3, C5) — the $-locked parts stay put, everything else shifts by the same +1 column, +1 row the cell itself moved.'),
+      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
+    ]),
+  ]);
+  document.body.appendChild(dialog);
 }
 
 async function showShare(spreadsheetId, shareUrl) {

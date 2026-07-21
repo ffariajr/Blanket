@@ -1,7 +1,7 @@
 // Grid rendering + editing. Fixed-size viewport grid (cols A..AD, 100
 // rows) -- generous for a small church spreadsheet app without needing
 // virtualized/infinite scroll. Sparse cell data: {"A1": {value, format, merge}}.
-import { isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo } from './formulas.js';
+import { isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo, shiftFormulaReferences } from './formulas.js';
 import { getUserInfoField, setUserInfoField } from './api.js';
 
 const COLS = 30; // A..AD
@@ -44,6 +44,7 @@ export class Grid {
     // unavailable (non-secure context, permission denied) -- copy/paste
     // still work within the app itself either way.
     this._internalClipboard = '';
+    this._internalClipboardOrigin = null; // {col,row} the last copy's top-left came from -- see _applyTsvAtSelection
     // Document-level listeners attach ONCE here, not in _build() -- _build()
     // now runs repeatedly (merge/unmerge/applyRemote-with-merge each force
     // a structural rebuild, see applyRemote below), and re-registering
@@ -701,15 +702,26 @@ export class Grid {
   // free instead of silently bypassing it -- pasting a new value into a
   // tracked cell is still "editing that cell going forward" per
   // CELL_SCHEMA.md's USERINFO semantics, same as typing or the formula bar.
-  _applyTsvAtSelection(text) {
+  //
+  // origin (optional): the top-left {col,row} of where this TSV was
+  // originally copied FROM. When known, a pasted formula value has its
+  // references shifted by (pasteTarget - origin) via
+  // shiftFormulaReferences() -- see CELL_SCHEMA.md's "$ locking" section.
+  // Unknown (paste from outside the app, or the Clipboard API round-trip
+  // couldn't confirm it's our own last copy) means formulas paste
+  // literally, unchanged -- the pre-existing behavior, not a regression.
+  _applyTsvAtSelection(text, origin) {
     if (!text) return;
     const startCell = parseRef(this.selected);
+    const deltaCols = origin ? startCell.col - origin.col : 0;
+    const deltaRows = origin ? startCell.row - origin.row : 0;
     const lines = text.replace(/\r/g, '').split('\n').filter((l, i, a) => !(i === a.length - 1 && l === ''));
     lines.forEach((line, r) => {
       line.split('\t').forEach((value, c) => {
         const ref = colLetter(startCell.col + c) + (startCell.row + r + 1);
         if (value === '' || this._isCovered(ref)) return;
-        this.setCellValue(ref, value);
+        const toWrite = origin && isFormula(value) ? shiftFormulaReferences(value, deltaCols, deltaRows) : value;
+        this.setCellValue(ref, toWrite);
       });
     });
   }
@@ -718,11 +730,14 @@ export class Grid {
   // the async Clipboard API when available (requires a secure context --
   // true in production, not necessarily true under local http:// dev),
   // and always to the in-app fallback so copy/paste still works within
-  // the app regardless.
+  // the app regardless. Also records the copy's origin corner (see
+  // _applyTsvAtSelection) so a same-app paste can shift formula refs.
   _copySelectionToClipboard() {
     if (!this.selected || this.editingInput) return;
     const tsv = this._selectionToTsv();
     this._internalClipboard = tsv;
+    const pa = parseRef(this.anchor), ps = parseRef(this.selected);
+    this._internalClipboardOrigin = { col: Math.min(pa.col, ps.col), row: Math.min(pa.row, ps.row) };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(tsv).catch(() => {
         /* OS clipboard unavailable/denied -- in-app fallback above still covers it */
@@ -734,10 +749,17 @@ export class Grid {
     if (!this.selected || this.editingInput) return;
     if (navigator.clipboard && navigator.clipboard.readText) {
       navigator.clipboard.readText()
-        .then((text) => this._applyTsvAtSelection(text || this._internalClipboard))
-        .catch(() => this._applyTsvAtSelection(this._internalClipboard));
+        .then((text) => {
+          // Only trust the origin (for ref-shifting) if what came back is
+          // exactly our own last copy -- different text means it came
+          // from outside the app (or a different copy we didn't track),
+          // so there's no known origin to shift from.
+          const origin = text === this._internalClipboard ? this._internalClipboardOrigin : undefined;
+          this._applyTsvAtSelection(text || this._internalClipboard, origin);
+        })
+        .catch(() => this._applyTsvAtSelection(this._internalClipboard, this._internalClipboardOrigin));
     } else {
-      this._applyTsvAtSelection(this._internalClipboard);
+      this._applyTsvAtSelection(this._internalClipboard, this._internalClipboardOrigin);
     }
   }
 

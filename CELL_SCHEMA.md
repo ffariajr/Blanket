@@ -34,10 +34,11 @@ a blank cell simply has no key, not an empty entry.
   (range functions, one range argument each), `ROUND(value, digits)`,
   `ABS(value)`, `IF(condition, then, else)`, `CONCAT`/`CONCATENATE(...)`
   (variadic string join), plus bare arithmetic (`+ - * /`, parens) and
-  comparisons (`= <> < > <= >=`) over cell refs and literals. `USERINFO(...)`
-  is a formula too, but is NOT one of these functions — it's handled
-  entirely separately (see "USERINFO cells" below) and never reaches
-  `evaluateFormula()`'s Parser.
+  comparisons (`= <> < > <= >=`) over cell refs and literals. References
+  support `$` column/row locking for copy/paste (see "Cell references and
+  copy/paste" below). `USERINFO(...)` is a formula too, but is NOT one of
+  these functions — it's handled entirely separately (see "USERINFO cells"
+  below) and never reaches `evaluateFormula()`'s Parser.
 - `format` (object, optional): `bold`/`italic`/`underline`/`wrap` (bool),
   `color`/`bg` (CSS color string, text/background), `fontFamily` (one of
   the fixed preset keys in `FONT_FAMILIES`, `assets/js/grid.js` — not a
@@ -141,6 +142,31 @@ anonymous policy allows view. A `field="email"` USERINFO cell on a sheet
 with lax anonymous view access broadcasts every signer's email to anyone
 who can view it — inherent to a self-service signup sheet as specified,
 worth being deliberate about per-sheet access when actually using this.
+
+## Cell references and copy/paste
+
+A reference like `A1` can independently lock its column and/or row with a
+`$` prefix, Excel-style: `A1` (fully relative), `$A1` (column locked),
+`A$1` (row locked), `$A$1` (both locked). This applies to both ends of a
+range (`$A$1:A5` is valid — locked start, row-relative end).
+
+`$` has **zero effect on evaluation** — `$A1`, `A$1`, `$A$1`, and `A1` all
+resolve to and compute from the exact same cell. It only matters when a
+formula is **copied to a different cell**: every unlocked reference
+component shifts by the same (column, row) delta the cell itself moved by;
+`$`-locked components stay fixed. Example: copying
+`=CONCAT($A1, A$3, B4)` from C5 to D6 (+1 column, +1 row) produces
+`=CONCAT($A2, B$3, C5)`. If a shift would move a reference before column A
+or row 1, the *entire* formula becomes `=#REF!` (matching Excel — a
+formula referencing a cell that no longer exists is wholly invalid, not
+just that one argument).
+
+Implemented by `shiftFormulaReferences()` in `assets/js/formulas.js`,
+applied by `Grid._applyTsvAtSelection()` in `assets/js/grid.js` whenever a
+paste's origin cell is known to be this app's own last copy (tracked via
+`Grid._internalClipboardOrigin`) — pasting formula text from outside the
+app (a different copy, another program) has no known origin, so it pastes
+literally, unshifted, same as before this feature existed.
 
 ## `columnWidths` / `rowHeights`
 
