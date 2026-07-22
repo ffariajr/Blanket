@@ -24,10 +24,8 @@ rather than left silent.
 
 ## Worth fixing now, while `fvf` is on the box for the WS wiring anyway
 
-**1. Systemd sandboxing for `blanket-ws.service`.** The unit currently
-only drops to an unprivileged user (`www-data`) -- no `ProtectSystem`,
-`ProtectHome`, `NoNewPrivileges`, or path restriction. Recommended
-additions (the unit file already has a comment flagging this):
+**1. Systemd sandboxing for `blanket-ws.service` -- done.** Added
+directly to the unit file already (nothing left to do here):
 
 ```ini
 NoNewPrivileges=true

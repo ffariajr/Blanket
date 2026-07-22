@@ -34,10 +34,17 @@ StandardError=journal
 
 # Binds only 127.0.0.1:8765 (see ws-server/server.py) -- never reachable
 # directly from outside, only through the Apache proxy configured in
-# deploy/apache-websocket-proxy.conf. No sandboxing directives beyond the
-# unprivileged user were added here to keep this a minimal first version;
-# consider ProtectSystem=strict / ProtectHome=true / NoNewPrivileges=true
-# as a later hardening pass once the deployment path is finalized.
+# deploy/apache-websocket-proxy.conf.
+#
+# Sandboxing: nothing about this process's normal operation needs
+# filesystem access beyond its own deploy directory (it talks to MySQL
+# over the network and reads its own two config files) -- so it gets none.
+# See security-concerns.md for the reasoning.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/www/blanket-ws
 
 [Install]
 WantedBy=multi-user.target
