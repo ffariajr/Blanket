@@ -6,7 +6,7 @@
 // Sparse cell data: {"A1": {value, format, merge}}.
 import {
   isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo,
-  shiftFormulaReferences, shiftReferencesForStructuralChange,
+  shiftFormulaReferences, shiftReferencesForStructuralChange, extractReferences,
 } from './formulas.js?v=__DEPLOY_VERSION__';
 import { getUserInfoField, setUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
 
@@ -131,7 +131,9 @@ export class Grid {
    */
   applyRemote(patch) {
     let structural = false;
+    let changedRefs = null;
     if (patch.cells) {
+      changedRefs = Object.keys(patch.cells);
       for (const [ref, value] of Object.entries(patch.cells)) {
         if (value === null) {
           if (this.cells[ref] && this.cells[ref].merge) structural = true;
@@ -169,7 +171,16 @@ export class Grid {
       this.rows = patch.rows;
       structural = true;
     }
-    if (structural) this._build();
+    if (structural) {
+      this._build();
+    } else if (changedRefs) {
+      // Structural changes already re-render every cell via _build()'s
+      // _renderAll() -- only the non-structural path needs an explicit
+      // dependents pass, so a formula cell watching one of these refs
+      // (e.g. D1="=B1+C1" watching a remote edit to B1) updates for every
+      // connected viewer, not just the one who made the edit.
+      this._recalcDependents(changedRefs);
+    }
   }
 
   // --- Build / render -------------------------------------------------
@@ -649,6 +660,7 @@ export class Grid {
     this.cells[ref] = nextCell;
     el.textContent = nextCell.value;
     this.onChange({ cells: { [ref]: nextCell } });
+    this._recalcDependents([ref]);
   }
 
   /**
@@ -673,11 +685,92 @@ export class Grid {
     this.setCellValue(ref, value);
   }
 
-  /** Resolves a ref to its evaluated value (number or string) for use inside another cell's formula. */
+  /**
+   * Resolves a ref to its evaluated value (number or string) for use inside
+   * another cell's formula. this._resolvingRefs tracks which refs are
+   * currently mid-resolution on the current (synchronous) call chain -- a
+   * classic DFS "gray set" -- so a circular reference (A1="=B1", B1="=A1")
+   * returns '#ERROR' the second time a ref is revisited instead of
+   * recursing forever and crashing the tab. Added to the set right before
+   * recursing and removed right after (try/finally) so it only reflects
+   * the current path, not every ref ever resolved -- a diamond dependency
+   * (C1 depends on both A1 and B1, which both depend on D1) is not a cycle
+   * and must not be flagged as one.
+   */
   _resolveRef(ref) {
     const cell = this.cells[ref];
     if (!cell || cell.value === undefined) return '';
-    return isFormula(cell.value) ? evaluateFormula(cell.value, (r) => this._resolveRef(r)) : cell.value;
+    if (!isFormula(cell.value)) return cell.value;
+    if (!this._resolvingRefs) this._resolvingRefs = new Set();
+    if (this._resolvingRefs.has(ref)) return '#ERROR';
+    this._resolvingRefs.add(ref);
+    try {
+      return evaluateFormula(cell.value, (r) => this._resolveRef(r));
+    } finally {
+      this._resolvingRefs.delete(ref);
+    }
+  }
+
+  /**
+   * Per-tab "which formula cells read this ref" graph, rebuilt fresh on
+   * every call rather than incrementally maintained -- sheets here are
+   * small (default 6x20, user-resizable but not spreadsheet-app-scale) so
+   * an O(cells) rebuild is cheap, and a fresh rebuild can never go stale
+   * the way an incrementally-patched graph could (e.g. forgetting to drop
+   * an edge when a formula is replaced with a literal). Keyed by the
+   * REFERENCED cell -> Set of formula cells that depend on it, which is
+   * the direction _recalcDependents needs to walk (starting from "this ref
+   * just changed").
+   */
+  _buildDependents() {
+    const dependents = new Map();
+    for (const [ref, cell] of Object.entries(this.cells)) {
+      if (!cell || !isFormula(cell.value)) continue;
+      for (const dep of extractReferences(cell.value)) {
+        if (!dependents.has(dep)) dependents.set(dep, new Set());
+        dependents.get(dep).add(ref);
+      }
+    }
+    return dependents;
+  }
+
+  /**
+   * Re-renders every formula cell that transitively depends on any of
+   * `changedRefs` -- this is what makes e.g. D1="=B1+C1" update when B1 is
+   * edited, instead of only ever reflecting a fresh value when D1 itself is
+   * directly touched. A breadth-first walk over _buildDependents(), not a
+   * topological sort: _renderCell/_resolveRef always recompute a cell's
+   * value fresh from live this.cells state (recursing into whatever THAT
+   * cell references), so re-rendering dependents in any order still lands
+   * on the correct final value for each -- this only needs to know WHICH
+   * cells to re-render, not in what order.
+   *
+   * Call this after any change that updates this.cells outside of a full
+   * _build() rebuild (setCellValue, applyRemote's non-structural cell
+   * branch, _clearSelection, USERINFO's direct-mutation renders) --
+   * anything that already triggers _build() (merge/unmerge, remote
+   * structural patches, insert/delete row/col) re-renders every cell via
+   * _renderAll() regardless, so dependents are already covered there.
+   */
+  _recalcDependents(changedRefs) {
+    const dependents = this._buildDependents();
+    const visited = new Set(changedRefs);
+    const queue = [...changedRefs];
+    const toRender = new Set();
+    while (queue.length) {
+      const ref = queue.shift();
+      const deps = dependents.get(ref);
+      if (!deps) continue;
+      for (const dep of deps) {
+        if (visited.has(dep)) continue;
+        visited.add(dep);
+        toRender.add(dep);
+        queue.push(dep);
+      }
+    }
+    for (const ref of toRender) {
+      if (!this._isCovered(ref)) this._renderCell(ref);
+    }
   }
 
   _onMouseDown(e) {
@@ -993,6 +1086,7 @@ export class Grid {
       }
     }
     this._renderCell(ref);
+    this._recalcDependents([ref]);
   }
 
   _onKeyDown(e) {
@@ -1145,13 +1239,16 @@ export class Grid {
    */
   _clearSelection() {
     if (this.readOnly || !this.anchor || !this.selected) return;
+    const cleared = [];
     for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
       if (this.cells[ref]) {
         delete this.cells[ref];
         this.onChange({ cells: { [ref]: null } });
         this._renderCell(ref);
+        cleared.push(ref);
       }
     }
+    if (cleared.length) this._recalcDependents(cleared);
   }
 
   /** Right-click "Cut": copy, then clear -- same two operations Ctrl+X would do if this app bound that shortcut. */

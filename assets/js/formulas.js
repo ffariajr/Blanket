@@ -104,6 +104,39 @@ export function evaluateFormula(formula, resolveRef) {
   }
 }
 
+/**
+ * Every cell reference a formula reads from, including ones inside a RANGE
+ * (expanded to individual refs) and nested function calls (tokenize()
+ * already flattens parentheses/nesting into one token stream, so a single
+ * scan for REF/RANGE tokens finds every reference regardless of how deep
+ * it's nested). Used by grid.js to build a "which cells does this formula
+ * depend on" graph so a change to one cell can propagate to every other
+ * cell whose formula reads it -- see grid.js's _buildDependents().
+ *
+ * @param {string} formula
+ * @returns {Set<string>} empty if `formula` isn't a formula, has no refs, or
+ *   fails to tokenize (a malformed formula that evaluateFormula() would
+ *   itself report as #ERROR has no well-defined dependencies either).
+ */
+export function extractReferences(formula) {
+  const refs = new Set();
+  if (!isFormula(formula)) return refs;
+  let tokens;
+  try {
+    tokens = tokenize(formula.slice(1));
+  } catch {
+    return refs;
+  }
+  for (const t of tokens) {
+    if (t.type === 'REF') {
+      refs.add(t.ref);
+    } else if (t.type === 'RANGE') {
+      for (const ref of expandRange(t.start, t.end)) refs.add(ref);
+    }
+  }
+  return refs;
+}
+
 // --- Tokenizer ---------------------------------------------------------
 
 // Optional '$' before the column letters and/or before the row digits,
