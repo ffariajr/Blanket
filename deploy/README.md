@@ -19,28 +19,42 @@ Live at `https://church.dogmanjr.net/blanket/`.
 
 ## 2. WebSocket server — code deployed by Claude, wiring needs root/fvf
 
-**Already done, at `/var/www/blanket-ws`:**
+**Already done, at `/var/www/church/blanket-ws`** (originally deployed to
+the sibling path `/var/www/blanket-ws`, then moved inside `church/` at
+Fernando's request):
 
 ```
-mkdir /var/www/blanket-ws
-rsync -a --exclude venv/ --exclude __pycache__/ /home/claude/blanket/ws-server/ /var/www/blanket-ws/ws-server/
-cp /home/claude/blanket/.mysql.env /home/claude/blanket/.app.env /var/www/blanket-ws/
-chmod 600 /var/www/blanket-ws/.mysql.env /var/www/blanket-ws/.app.env
-python3 -m venv /var/www/blanket-ws/ws-server/venv
-/var/www/blanket-ws/ws-server/venv/bin/pip install -r /var/www/blanket-ws/ws-server/requirements.txt
+mkdir /var/www/church/blanket-ws
+rsync -a --exclude venv/ --exclude __pycache__/ /home/claude/blanket/ws-server/ /var/www/church/blanket-ws/ws-server/
+cp /home/claude/blanket/.mysql.env /home/claude/blanket/.app.env /var/www/church/blanket-ws/
+chmod 640 /var/www/church/blanket-ws/.mysql.env /var/www/church/blanket-ws/.app.env
+python3 -m venv /var/www/church/blanket-ws/ws-server/venv
+/var/www/church/blanket-ws/ws-server/venv/bin/pip install -r /var/www/church/blanket-ws/ws-server/requirements.txt
 ```
+
+**Critical, non-optional step:** `/var/www/church/blanket-ws/.htaccess`
+must contain `Require all denied`. This directory sits *inside*
+`DocumentRoot /var/www/church` (a sibling of `blanket/`), unlike the
+original `/var/www/blanket-ws` location, which was structurally
+unreachable by Apache regardless of any config. Now its non-exposure
+depends entirely on that `.htaccess` being present and correct -- it was
+created *before* any file was moved into the directory, specifically to
+avoid a window where the secrets/source were reachable. If this
+directory is ever recreated from scratch, create the `.htaccess` first.
 
 Verified: server boots cleanly from this location (`server.py` run
 directly), listens on `127.0.0.1:8765`, resolves `.mysql.env`/`.app.env`
-correctly, and shuts down gracefully on SIGTERM. Not left running --
-there's no supervisor for it yet (that's step 2b).
+correctly, and the venv's `bin/python` still resolves its interpreter and
+imports correctly after the move (it symlinks to `/usr/bin/python3`,
+not a path baked in under the venv itself, so relocating the whole venv
+as one unit doesn't break it).
 
-Currently owned `claude:www-data`, secrets at `600` (owner-read-only).
-Fernando's plan is to `chown -R www-data:www-data /var/www` once
-development settles, which is why ownership wasn't otherwise fussed over
-here -- once that happens, `600` on the two secrets files means only
-`www-data` (the new owner) can read them, which is *more* restrictive
-than the workaround needed on the PHP side (see security-concerns.md).
+Currently owned `claude:www-data`, secrets at `640` (group-readable by
+`www-data`, not world). Fernando's plan is to `chown -R www-data:www-data
+/var/www` once development settles, which is why ownership wasn't
+otherwise fussed over here -- once that happens, `640` on the two secrets
+files still means only `www-data` (the new owner, and its own group) can
+read them.
 
 **Still needs root/fvf** — nothing below this point is about file
 ownership under `/var/www`; these are genuine root-only operations
@@ -101,8 +115,9 @@ include `?token=<JWT>` from a real login.
   (dev-only tooling, no runtime purpose in the docroot) in addition to the
   existing git/docs/secrets/tests exclusions -- see its comments.
 - If `blanket-ws` needs redeploying after a code change: re-run the rsync
-  above, then `sudo systemctl restart blanket-ws`. No auto-deploy yet,
-  matching the PHP app's manual `install.sh --apply` model.
+  above (target `/var/www/church/blanket-ws/ws-server/`), then
+  `sudo systemctl restart blanket-ws`. No auto-deploy yet, matching the
+  PHP app's manual `install.sh --apply` model.
 - See `security-concerns.md` for hardening items worth addressing,
   several of which are cheapest to do now while `fvf` is already on the
   box for step 2.

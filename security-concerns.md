@@ -32,7 +32,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/www/blanket-ws
+ReadWritePaths=/var/www/church/blanket-ws
 ```
 
 `ReadWritePaths` matters here specifically because nothing about the WS
@@ -48,8 +48,22 @@ blast radius as compromising both -- a bug in one could read the other's
 secrets or interfere with its process. A dedicated, unprivileged service
 account for the WS server (instead of reusing `www-data`) would meaningfully
 narrow this, at the cost of a bit more setup (new user, group read access
-to `/var/www/blanket-ws/.mysql.env`/`.app.env`). Recommended, not
+to `/var/www/church/blanket-ws/.mysql.env`/`.app.env`). Recommended, not
 mandatory -- flagging the tradeoff rather than deciding it.
+
+**2b. `blanket-ws` now lives inside `church/`'s docroot.** Originally
+deployed to `/var/www/blanket-ws`, a sibling of `church/` under
+`/var/www` -- structurally unreachable by Apache no matter what, since it
+sat outside `DocumentRoot /var/www/church` entirely. Moved to
+`/var/www/church/blanket-ws` at Fernando's request, which changes that:
+it's now *inside* a `Require all granted` docroot, and its non-exposure
+depends entirely on `/var/www/church/blanket-ws/.htaccess` containing
+`Require all denied` (created before any file was moved in, so there was
+never a window where it was reachable). If that `.htaccess` is ever lost,
+edited, or the directory recreated without it, the WS server's source and
+DB credentials become directly downloadable. Worth an occasional
+`curl -I https://church.dogmanjr.net/blanket-ws/ws-server/server.py`
+sanity check (expect 403) after any change near there.
 
 **3. JWTs land in Apache's access logs.** The WS handshake carries the
 token as a URL query parameter (`?token=<JWT>`) -- the only practical way
