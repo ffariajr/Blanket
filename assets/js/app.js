@@ -515,6 +515,16 @@ async function renderSheet(spreadsheetId, tabId) {
       lastSavedAt = new Date();
       renderSavedLabel();
     },
+    // The connection can be fully "Live" while still rejecting a specific
+    // edit (e.g. anonymous view-only access) -- that used to only reach
+    // the console, so an edit could silently have no effect with nothing
+    // in the UI explaining why. Reuses the same transient-toast pattern
+    // as the context-menu hints, anchored near the status row since
+    // there's no cursor position to anchor to here.
+    onServerError: (message) => {
+      const rect = connectionEl.getBoundingClientRect();
+      showTransientHint(message, rect.left, rect.bottom);
+    },
     onStatus: (status) => {
       // "unavailable" and "disconnected" both mean the REST fallback is
       // doing the saving instead -- editing still works either way, so

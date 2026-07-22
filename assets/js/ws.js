@@ -9,13 +9,21 @@ const KEYSTROKE_THROTTLE_MS = 150;
 const EDIT_DEBOUNCE_MS = 400;
 
 export class TabSocket {
-  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus }) {
+  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError }) {
     this.tabId = tabId;
     this.onState = onState || (() => {});
     this.onRemoteEdit = onRemoteEdit || (() => {});
     this.onRemoteKeystroke = onRemoteKeystroke || (() => {});
     this.onSaved = onSaved || (() => {});
     this.onStatus = onStatus || (() => {});
+    // Server-side rejections (e.g. "View-only access" when an edit is
+    // attempted without edit rights, "Tab not found") used to only reach
+    // console.warn below -- the connection itself stays open and the
+    // status indicator correctly keeps showing Live (view access is still
+    // valid), so nothing in the UI ever explained why an edit silently had
+    // no effect. This surfaces it visibly instead; console.warn stays too,
+    // for anyone actually checking devtools.
+    this.onServerError = onServerError || (() => {});
     this.ws = null;
     this.connected = false;
     this._pendingPatch = null;
@@ -65,6 +73,7 @@ export class TabSocket {
           break;
         case 'error':
           console.warn('ws error:', msg.message);
+          this.onServerError(msg.message);
           break;
       }
     });
