@@ -284,6 +284,13 @@ async function renderNoTabs(spreadsheetId, spreadsheet) {
     showManageTabs(spreadsheetId, null, () => route());
   }
 
+  // Creating a tab is a tab-structure write, owner-only (TabController::
+  // create() gates on canManage -- see the comment there). This is a rare
+  // edge case in practice (every new spreadsheet auto-creates "tab-0"
+  // now), but a non-owner somehow landing here shouldn't see a button
+  // that would just be rejected by the server.
+  const canManage = !!spreadsheet && spreadsheet.my_access === 'owner';
+
   mount(el('div', { class: 'page' }, [
     el('header', { class: 'topbar' }, [
       el('a', { href: '#/sheets', class: 'link' }, '← All spreadsheets'),
@@ -291,7 +298,9 @@ async function renderNoTabs(spreadsheetId, spreadsheet) {
     ]),
     el('div', { class: 'centered' }, [
       el('p', { class: 'muted' }, "This spreadsheet doesn't have any tabs yet."),
-      el('button', { class: 'btn', onclick: openManageTabs }, 'Add a tab'),
+      canManage
+        ? el('button', { class: 'btn', onclick: openManageTabs }, 'Add a tab')
+        : el('p', { class: 'muted' }, 'Ask the owner to add one.'),
     ]),
   ]));
 }
@@ -548,6 +557,7 @@ async function renderSheet(spreadsheetId, tabId) {
       tabId,
       tabName: currentTab ? currentTab.name : 'Tab',
       grid,
+      canManage: canManageAccess,
       onRenamed: reload,
     });
   });
@@ -604,15 +614,15 @@ async function renderSheet(spreadsheetId, tabId) {
     tabMenuBtn,
   ]);
 
-  // Rename (spreadsheet title) requires owner (TabController/
-  // SpreadsheetController::rename both gate on canManage -- owner only);
-  // Manage tabs requires only edit (TabController's create/rename/
-  // reorder/delete all gate on canEdit, same as cell writes) -- both used
-  // to render unconditionally regardless of readOnly/canManageAccess,
-  // same silently-rejected-on-click gap as everything else in this pass.
+  // Rename (spreadsheet title), Manage tabs, and Share are all owner-only
+  // (TabController's create/rename/reorder/delete now gate on canManage,
+  // not canEdit, per Fernando: "only the spreadsheet owner can manage
+  // tabs" -- an editor can change cell content but not tab structure).
+  // canManageAccess already covers admins too (Permissions::levelFor()
+  // treats an admin as 'owner').
   const actions = el('div', { class: 'sheet-actions' }, [
     canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showRenameSpreadsheet(spreadsheet, reload) }, 'Rename') : null,
-    !readOnly ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showManageTabs(spreadsheetId, tabId, reload) }, 'Manage tabs') : null,
+    canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showManageTabs(spreadsheetId, tabId, reload) }, 'Manage tabs') : null,
     canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showShare(spreadsheetId, shareUrl) }, 'Share') : null,
     el('a', { href: '#/sheets', class: 'btn btn-secondary btn-small' }, 'Exit'),
   ]);
@@ -1092,12 +1102,15 @@ function showHeaderContextMenu(x, y, grid, kind, index) {
 // to the tab you're looking at" (Fernando: "in the tab menu, I want import
 // and export buttons, history, rename tab"), that's "manage every tab in
 // this spreadsheet" (create/reorder/delete any of them).
-function showTabMenu(anchorEl, { tabId, tabName, grid, onRenamed }) {
+function showTabMenu(anchorEl, { tabId, tabName, grid, canManage, onRenamed }) {
   document.querySelectorAll('.tab-menu').forEach((n) => n.remove());
 
-  // Export/History are read-only-safe (both just read data); Import CSV
-  // and Rename are writes -- excluded outright in read-only mode rather
-  // than left clickable-but-silently-rejected by the server.
+  // Export/History are read-only-safe (both just read data). Import CSV
+  // is a content write, gated the same as cell edits (!grid.readOnly --
+  // edit or owner). Rename is a tab-STRUCTURE write, gated on `canManage`
+  // instead (owner only, matching TabController's canManage check --
+  // Fernando: "only the spreadsheet owner can manage tabs") -- an editor
+  // can write cell content but not rename/reorder/create/delete tabs.
   const items = [
     el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); exportCsv(tabId); } }, 'Export CSV'),
   ];
@@ -1111,7 +1124,7 @@ function showTabMenu(anchorEl, { tabId, tabName, grid, onRenamed }) {
     ]));
   }
   items.push(el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); showHistory(tabId, grid); } }, 'History'));
-  if (!grid.readOnly) {
+  if (canManage) {
     items.push(el('button', {
       class: 'tab-menu-item', type: 'button',
       onclick: async () => {

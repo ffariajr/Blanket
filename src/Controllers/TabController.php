@@ -38,13 +38,23 @@ final class TabController
         Response::json(['tabs' => $this->tabs->listForSpreadsheet($spreadsheet['id'])]);
     }
 
-    /** Creates the tab, then writes the initial spreadsheet_history row (sequence 1) attributed to the creator -- see db/schemas.md, tabs. */
+    /**
+     * Creates the tab, then writes the initial spreadsheet_history row (sequence 1) attributed to the creator -- see db/schemas.md, tabs.
+     *
+     * Every tab-structure mutation in this class (create/rename/reorder/
+     * softDelete) requires canManage(), not canEdit() -- Fernando: "only
+     * the spreadsheet owner can manage tabs." canManage() already covers
+     * admins too (Permissions::levelFor() treats an admin as 'owner'), so
+     * this is "owner or admin," same as spreadsheet rename/share already
+     * were -- an editor can change cell content but not the tab structure
+     * itself.
+     */
     public function create(Request $request): void
     {
         $user = Authenticator::resolve($request);
         $spreadsheet = $this->requireSpreadsheet((int) $request->params['spreadsheet_id']);
 
-        if (!$this->permissions->canEdit($spreadsheet, $user)) {
+        if (!$this->permissions->canManage($spreadsheet, $user)) {
             Response::error('Forbidden', 403);
         }
 
@@ -80,7 +90,7 @@ final class TabController
         $user = Authenticator::resolve($request);
         [, $spreadsheet] = $this->requireTabAndSpreadsheet((int) $request->params['id']);
 
-        if (!$this->permissions->canEdit($spreadsheet, $user)) {
+        if (!$this->permissions->canManage($spreadsheet, $user)) {
             Response::error('Forbidden', 403);
         }
 
@@ -98,7 +108,7 @@ final class TabController
         $user = Authenticator::resolve($request);
         [, $spreadsheet] = $this->requireTabAndSpreadsheet((int) $request->params['id']);
 
-        if (!$this->permissions->canEdit($spreadsheet, $user)) {
+        if (!$this->permissions->canManage($spreadsheet, $user)) {
             Response::error('Forbidden', 403);
         }
 
@@ -118,7 +128,7 @@ final class TabController
         $tabId = (int) $request->params['id'];
         [$tab, $spreadsheet] = $this->requireTabAndSpreadsheet($tabId);
 
-        if (!$this->permissions->canEdit($spreadsheet, $user)) {
+        if (!$this->permissions->canManage($spreadsheet, $user)) {
             Response::error('Forbidden', 403);
         }
 
