@@ -22,6 +22,14 @@ Client -> server, after hello:
     "error" reply) from view-only clients.
   {"type": "save"}
     Forces an immediate persist if the document has unsaved changes.
+  {"type": "presence_active", "active": true|false}
+    Reports a page-visibility/idle-timer change. Rebroadcast (via a
+    "presence" message, see below) to every connection across every tab
+    of this spreadsheet, not just this tab_id -- presence is spreadsheet-
+    wide (see presence.py).
+  {"type": "selection", "selection": {"anchor": "A1", "selected": "B3"} | null}
+    Reports the sender's current cell/range selection (anchor === selected
+    for a single cell; null for nothing selected). Rebroadcast the same way.
 
 Server -> client:
   {"type": "state", "sequence": N, "data": {...}}
@@ -33,6 +41,17 @@ Server -> client:
   {"type": "saved", "sequence": N}
     A persist just happened; N is the new current sequence.
   {"type": "error", "message": "..."}
+  {"type": "presence", "viewers": [{"connection_id":.., "user_id":..,
+    "name":.., "is_anonymous":.., "color":"#rrggbb", "tab_id":..,
+    "selection":{...}|null, "active":.., "last_active_at":<epoch seconds>}, ...]}
+    Sent once right after hello (current roster) and again on every
+    connect/disconnect/presence_active/selection anywhere in the
+    spreadsheet -- the FULL roster every time, not a diff (church-scale
+    concurrency, not worth incremental diffing). Includes viewers on
+    OTHER tabs of the same spreadsheet, each tagged with their tab_id, so
+    a client can show "someone's on a different tab" (e.g. a color dot on
+    that tab in the tab bar) as well as who's on the tab it's actually
+    looking at.
 
 Persistence: throttled (see session.py), always a full-document snapshot
 into spreadsheet_history -- never the edit patches themselves.
@@ -51,6 +70,7 @@ from websockets.exceptions import ConnectionClosed
 import access
 import auth
 from session import TabSession, ClientInfo
+from presence import SpreadsheetPresence
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("blanket.server")
@@ -113,6 +133,8 @@ async def handle_connection(websocket):
     client_info = ClientInfo(identity, access_level, client_ip(websocket))
     session = await TabSession.get_or_create(tab_id)
     await session.add_client(websocket, client_info)
+    presence = SpreadsheetPresence.get_or_create(spreadsheet_id)
+    await presence.add_viewer(websocket, tab_id, identity.user_id, identity.display_name, identity.is_anonymous)
     logger.info(
         "client joined tab_id=%s user_id=%s name=%s access=%s",
         tab_id, identity.user_id, identity.display_name, access_level,
@@ -132,10 +154,15 @@ async def handle_connection(websocket):
                 await session.handle_keystroke(websocket, message.get("payload", {}))
             elif msg_type == "save":
                 await session.handle_save(websocket)
+            elif msg_type == "presence_active":
+                await presence.set_active(websocket, bool(message.get("active")))
+            elif msg_type == "selection":
+                await presence.set_selection(websocket, message.get("selection"))
     except ConnectionClosed:
         pass
     finally:
         await session.remove_client(websocket)
+        await presence.remove_viewer(websocket)
         logger.info("client left tab_id=%s user_id=%s", tab_id, identity.user_id)
 
 

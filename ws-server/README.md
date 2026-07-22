@@ -58,6 +58,15 @@ Client -> server, after `hello`:
   design. The frontend must produce patches in this shape.
 - `{"type": "save"}` -- forces an immediate persist if there are unsaved
   changes.
+- `{"type": "presence_active", "active": true|false}` -- reports a page-
+  visibility/idle-timer change (the actual visibility/focus/interaction
+  logic that decides when to send this is a frontend concern, not this
+  server's -- see `presence.py`'s module docstring). Triggers a `presence`
+  rebroadcast to the whole spreadsheet, not just this tab.
+- `{"type": "selection", "selection": {"anchor": "A1", "selected": "B3"} | null}`
+  -- reports the sender's current cell/range selection (`anchor ===
+  selected` for a single cell; `null` for nothing selected). Same
+  rebroadcast.
 
 Server -> client:
 - `{"type": "state", "sequence": N, "data": {...}}` -- sent once, right
@@ -67,6 +76,57 @@ Server -> client:
 - `{"type": "keystroke", "from": {...}, "payload": {...}}`
 - `{"type": "saved", "sequence": N}` -- a persist just happened.
 - `{"type": "error", "message": "..."}`
+- `{"type": "presence", "viewers": [{"connection_id":.., "user_id":..,
+  "name":.., "is_anonymous":.., "color":"#rrggbb", "tab_id":..,
+  "selection":{...}|null, "active":.., "last_active_at":<epoch seconds>},
+  ...]}` -- see "Presence" below.
+
+## Presence
+
+Fernando's ask: show who's viewing a spreadsheet, what they've selected,
+an active/idle state, and a distinct color reused for their name and
+selection highlight -- spanning the *whole spreadsheet*, not just the
+current tab (someone on a different tab of the same spreadsheet should
+still show up, tagged with which tab they're on).
+
+Implemented in `presence.py` as `SpreadsheetPresence`, a registry keyed by
+`spreadsheet_id` (one per currently-open spreadsheet, created on first
+connect and torn down when the last viewer of that spreadsheet leaves) --
+deliberately separate from `TabSession` (`session.py`), which stays scoped
+per `tab_id` and owns the actual document/persistence. `spreadsheet_id` is
+already resolved once at connect time by `access.resolve()` for the
+permission check; presence reuses that same value rather than requerying.
+
+A viewer is added to their spreadsheet's registry on connect (`hello`
+succeeding) and removed on disconnect. Every `presence_active`/`selection`
+message, and every connect/disconnect, triggers a full-roster rebroadcast
+(`{"type": "presence", "viewers": [...]}`) to *every* connection across
+*every* tab of that spreadsheet -- not a diff, and not scoped to just the
+sender's own tab_id. A client filters client-side: viewers whose `tab_id`
+matches the tab it's currently looking at get full selection-highlight
+treatment; viewers on other tabs just contribute their `color` to that
+tab's entry in the tab bar.
+
+**Color assignment**: a fixed 12-color palette (`presence._PALETTE`),
+scoped per spreadsheet registry (two different spreadsheets can reuse the
+same color for different people -- only viewers of the *same* spreadsheet
+need to be distinguishable from each other). The first color not already
+in use by another connection on that spreadsheet is assigned on connect,
+freed on disconnect; if concurrent viewers ever exceed the palette (not a
+realistic scenario at this app's scale), colors cycle/reuse rather than
+erroring.
+
+**Active/idle**: this server only stores and rebroadcasts whatever
+`active` boolean the client reports -- the actual page-visibility/focus/
+interaction-timer logic that decides *when* to send `presence_active` is
+entirely a frontend concern. `last_active_at` updates only when `active`
+actually transitions (not on every message received) -- it means "last
+time this viewer was confirmed active," not "last time we heard from
+them at all."
+
+**Identity**: `user_id`/`name`/`is_anonymous` come from the same
+`auth.resolve_identity()` result already used for save attribution
+elsewhere -- nothing new to resolve, just surfaced in presence entries.
 
 ## Persistence / durability
 
