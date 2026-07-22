@@ -3,7 +3,7 @@
 // socket never connects (e.g. before the Apache proxy for it is wired up)
 // or drops, the app keeps working via the plain REST API -- this class
 // just stops emitting events, it never throws into the UI.
-import { getToken, getDisplayName } from './api.js';
+import { getToken, getDisplayName } from './api.js?v=__DEPLOY_VERSION__';
 
 const KEYSTROKE_THROTTLE_MS = 150;
 const EDIT_DEBOUNCE_MS = 400;

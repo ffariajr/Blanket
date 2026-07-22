@@ -1,6 +1,6 @@
-import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser, APP_BASE } from './api.js';
-import { Grid, FONT_FAMILIES, FONT_SIZES } from './grid.js';
-import { TabSocket } from './ws.js';
+import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
+import { Grid, FONT_FAMILIES, FONT_SIZES } from './grid.js?v=__DEPLOY_VERSION__';
+import { TabSocket } from './ws.js?v=__DEPLOY_VERSION__';
 
 const root = document.getElementById('app');
 let currentTeardown = null;

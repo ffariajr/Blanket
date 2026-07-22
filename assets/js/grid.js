@@ -7,8 +7,8 @@
 import {
   isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo,
   shiftFormulaReferences, shiftReferencesForStructuralChange,
-} from './formulas.js';
-import { getUserInfoField, setUserInfoField } from './api.js';
+} from './formulas.js?v=__DEPLOY_VERSION__';
+import { getUserInfoField, setUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
 
 // Fallback for a document saved before per-tab dimensions existed (no
 // `cols`/`rows` keys at all) -- the old fixed size, so pre-existing data

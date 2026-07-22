@@ -103,15 +103,24 @@ else
   find "$DEST_DIR" -mindepth 1 -type f -exec chmod o+r {} + 2>/dev/null || true
 
   # Cache-busting: index.html references assets/{app.js,app.css} with a
-  # __DEPLOY_VERSION__ placeholder (see index.html) -- stamp it with a real
-  # value on every deploy so each new deploy is a distinct URL to the
-  # browser. Apache sends no Cache-Control on static files here (mod_headers
-  # isn't enabled, and enabling it needs root) and, more importantly,
-  # <script type="module"> files are fetched once per page load and never
-  # re-fetched for that page's lifetime regardless of HTTP caching -- this
-  # doesn't fix an already-open tab (only a reload does), but it does mean
-  # any *new* page load reliably gets the current code instead of a
-  # heuristically browser-cached stale copy of an old deploy.
-  sed -i "s/__DEPLOY_VERSION__/$(date +%s)/g" "$DEST_DIR/index.html"
+  # __DEPLOY_VERSION__ placeholder, and app.js/grid.js/ws.js carry the same
+  # placeholder on their own ES module imports of each other (app.js ->
+  # api.js/grid.js/ws.js, grid.js -> formulas.js/api.js, ws.js -> api.js) --
+  # stamping only index.html would leave those imports as bare unversioned
+  # URLs, so a plain page reload could still serve a browser-cached stale
+  # copy of exactly the files most likely to matter (e.g. grid.js's
+  # applyRemote) even though app.js itself got a fresh fetch. Stamp all of
+  # them with the same value so a single deploy is one consistent version
+  # bump across the whole module graph. Apache sends no Cache-Control on
+  # static files here (mod_headers isn't enabled, needs root) and, more
+  # importantly, ES modules are fetched once per page load regardless of
+  # HTTP caching -- this doesn't fix an already-open tab (only a reload
+  # does), but guarantees any *new* page load gets current code.
+  DEPLOY_VERSION="$(date +%s)"
+  sed -i "s/__DEPLOY_VERSION__/$DEPLOY_VERSION/g" \
+    "$DEST_DIR/index.html" \
+    "$DEST_DIR/assets/js/app.js" \
+    "$DEST_DIR/assets/js/grid.js" \
+    "$DEST_DIR/assets/js/ws.js"
   echo "Done."
 fi
