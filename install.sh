@@ -64,6 +64,7 @@ RSYNC_ARGS=(
   --exclude 'REQUIREMENTS.md'
   --exclude 'ACCESS.md'
   --exclude 'CELL_SCHEMA.md'
+  --exclude 'security-concerns.md'
   --exclude 'db/'
   --exclude 'deploy/'
   --exclude 'tests/'

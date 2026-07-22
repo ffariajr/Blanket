@@ -1,14 +1,9 @@
 # Deploying Blanket
 
 Two independent pieces: the PHP app (Apache-served, static+API) and the
-Python WebSocket server (a standalone process, proxied by Apache). Each
-step below is marked with who can actually do it.
+Python WebSocket server (a standalone process, proxied by Apache).
 
-## 1. PHP app — Claude (claude user) can do this alone
-
-The `claude` user already has write access to `/var/www/church/blanket`
-and DDL access to the `blanket` database (dev-time grants). No root/fvf
-action needed for this part.
+## 1. PHP app — already deployed by Claude
 
 ```
 cd /home/claude/blanket
@@ -16,47 +11,44 @@ cd /home/claude/blanket
 cp .mysql.env .app.env /var/www/church/blanket/
 ```
 
-(`install.sh` deliberately never syncs `.mysql.env`/`.app.env` -- copy them
-by hand, once, into the deploy root, sibling to `index.php` --
-`src/Config.php` resolves them via `dirname(__DIR__)`, i.e. the app root.)
+(`install.sh` deliberately never syncs `.mysql.env`/`.app.env` -- copied
+by hand into the deploy root, sibling to `index.php` -- `src/Config.php`
+resolves them via `dirname(__DIR__)`, i.e. the app root.)
 
-Verify: `https://church.dogmanjr.net/blanket/api/health` should return
-`{"status":"ok"}`. The frontend and REST API work at this point even
-before the WebSocket server is wired up -- real-time collab just won't be
-live yet (the frontend fork built it to degrade gracefully to plain
-REST-based load/save when the socket isn't reachable).
+Live at `https://church.dogmanjr.net/blanket/`.
 
-## 2. WebSocket server -- needs root/fvf
+## 2. WebSocket server — code deployed by Claude, wiring needs root/fvf
 
-Claude does not have write access outside `/var/www/church/blanket`, and
-cannot touch `/etc/apache2`, `/etc/systemd/system`, or run
-`systemctl`/`a2enmod`. Everything below this point needs a human with
-sudo.
-
-**a. Deploy the server code** (suggested path -- adjust freely, just keep
-`deploy/blanket-ws.service` in sync with wherever it actually goes):
+**Already done, at `/var/www/blanket-ws`:**
 
 ```
-sudo mkdir -p /var/www/blanket-ws
-sudo rsync -a --exclude venv/ --exclude __pycache__/ /home/claude/blanket/ws-server/ /var/www/blanket-ws/ws-server/
-sudo cp /home/claude/blanket/.mysql.env /home/claude/blanket/.app.env /var/www/blanket-ws/
-sudo chown -R www-data:www-data /var/www/blanket-ws
+mkdir /var/www/blanket-ws
+rsync -a --exclude venv/ --exclude __pycache__/ /home/claude/blanket/ws-server/ /var/www/blanket-ws/ws-server/
+cp /home/claude/blanket/.mysql.env /home/claude/blanket/.app.env /var/www/blanket-ws/
+chmod 600 /var/www/blanket-ws/.mysql.env /var/www/blanket-ws/.app.env
+python3 -m venv /var/www/blanket-ws/ws-server/venv
+/var/www/blanket-ws/ws-server/venv/bin/pip install -r /var/www/blanket-ws/ws-server/requirements.txt
 ```
 
-(`.mysql.env`/`.app.env` go at `/var/www/blanket-ws/`, one level *above*
-`ws-server/` -- `ws-server/config.py` resolves them the same way
-`src/Config.php` does, relative to its own parent directory.)
+Verified: server boots cleanly from this location (`server.py` run
+directly), listens on `127.0.0.1:8765`, resolves `.mysql.env`/`.app.env`
+correctly, and shuts down gracefully on SIGTERM. Not left running --
+there's no supervisor for it yet (that's step 2b).
 
-**b. Set up the venv:**
+Currently owned `claude:www-data`, secrets at `600` (owner-read-only).
+Fernando's plan is to `chown -R www-data:www-data /var/www` once
+development settles, which is why ownership wasn't otherwise fussed over
+here -- once that happens, `600` on the two secrets files means only
+`www-data` (the new owner) can read them, which is *more* restrictive
+than the workaround needed on the PHP side (see security-concerns.md).
 
-```
-sudo -u www-data python3 -m venv /var/www/blanket-ws/ws-server/venv
-sudo -u www-data /var/www/blanket-ws/ws-server/venv/bin/pip install -r /var/www/blanket-ws/ws-server/requirements.txt
-```
+**Still needs root/fvf** — nothing below this point is about file
+ownership under `/var/www`; these are genuine root-only operations
+(kernel module loading, `/etc/apache2`, `/etc/systemd/system`, `systemctl`):
 
-**c. Enable WebSocket proxying in Apache** -- see
+**a. Enable WebSocket proxying in Apache** — see
 `deploy/apache-websocket-proxy.conf` for the exact snippet and where it
-goes in `050-church.conf` / `050-church-le-ssl.conf`. Summary:
+goes in `050-church.conf` / `050-church-le-ssl.conf`.
 
 ```
 sudo a2enmod proxy_wstunnel
@@ -65,13 +57,17 @@ sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-**d. Install and start the systemd service:**
+**b. Install and start the systemd service:**
 
 ```
 sudo cp /home/claude/blanket/deploy/blanket-ws.service /etc/systemd/system/blanket-ws.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now blanket-ws
 ```
+
+Review `security-concerns.md` before this step -- a few cheap systemd
+hardening directives are worth adding to `blanket-ws.service` first
+(it already has a comment flagging this).
 
 ## 3. Verify
 
@@ -101,10 +97,12 @@ include `?token=<JWT>` from a real login.
 
 ## Notes
 
-- `install.sh` now excludes `db/` and `deploy/` from the PHP deploy sync
+- `install.sh` excludes `db/` and `deploy/` from the PHP deploy sync
   (dev-only tooling, no runtime purpose in the docroot) in addition to the
   existing git/docs/secrets/tests exclusions -- see its comments.
-- If `blanket-ws` needs restarting after a code change:
-  `sudo systemctl restart blanket-ws`. There's no auto-deploy for the WS
-  server yet, matching the PHP app's manual `install.sh --apply` model --
-  redeploy step 2a, then restart.
+- If `blanket-ws` needs redeploying after a code change: re-run the rsync
+  above, then `sudo systemctl restart blanket-ws`. No auto-deploy yet,
+  matching the PHP app's manual `install.sh --apply` model.
+- See `security-concerns.md` for hardening items worth addressing,
+  several of which are cheapest to do now while `fvf` is already on the
+  box for step 2.
