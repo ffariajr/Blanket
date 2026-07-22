@@ -29,7 +29,7 @@ if [ ! -d "$DEST_DIR" ]; then
 fi
 
 RSYNC_ARGS=(
-  -av --delete
+  -av --delete --delete-excluded
   # -a implies preserving mtime/perms/owner/group. This deploy directory
   # is www-data owned; the claude user only has group write on its
   # contents, not ownership of the directory entries themselves -- rsync
@@ -44,36 +44,27 @@ RSYNC_ARGS=(
   --no-perms
   --no-owner
   --no-group
-  # No trailing slash: a trailing slash only matches a *directory* named
-  # .git, which is true in a normal checkout but not in a git worktree
-  # (there .git is a plain file pointing back at the main repo) -- a
-  # trailing-slash-only pattern would silently let that file sync straight
-  # into the public docroot if this script is ever run from a worktree.
-  --exclude '.git'
-  --exclude '.gitignore'
-  # Any dotenv-style secrets file (.mysql.env, .app.env, and anything else
-  # added later) -- a bare '.mysql.env'/'.env'/'.env.*' list here once
-  # missed .app.env entirely when it was added, letting it rsync straight
-  # into the public docroot. .htaccess also blocks *.env and dotfiles from
-  # being served, but this should never rely on that as the only layer.
-  --exclude '*.env'
-  --exclude 'install.sh'
-  --exclude 'dev-router.php'
-  --exclude 'README.md'
-  --exclude 'MACHINE.md'
-  --exclude 'REQUIREMENTS.md'
-  --exclude 'ACCESS.md'
-  --exclude 'CELL_SCHEMA.md'
-  --exclude 'security-concerns.md'
-  --exclude 'db/'
-  --exclude 'deploy/'
-  --exclude 'tests/'
-  --exclude 'ws-server/'
-  --exclude 'venv/'
-  --exclude '.venv/'
-  --exclude '__pycache__/'
-  --exclude '*.pyc'
-  --exclude '.claude/'
+  # Allowlist, not a denylist: only these paths are ever web-facing. A
+  # denylist here once let a stray root-level scratch file (next.txt,
+  # containing private notes) sync straight into the public docroot,
+  # world-readable, simply because nobody had added its name to an
+  # exclude list -- any *future* stray file (notes, drafts, anything
+  # dropped at the repo root) would have silently leaked the same way.
+  # An allowlist can't have that failure mode: a new root-level file is
+  # excluded by default and only becomes web-facing by deliberate choice.
+  # --delete-excluded (above) means anything not on this list is actively
+  # removed from the deploy target too, cleaning up past leaks like
+  # next.txt automatically on the next deploy.
+  --include '/.htaccess'
+  --include '/index.html'
+  --include '/index.php'
+  --include '/assets/'
+  --include '/assets/**'
+  --include '/src/'
+  --include '/src/**'
+  --include '/vendor/'
+  --include '/vendor/**'
+  --exclude '*'
 )
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -81,7 +72,27 @@ if [ "$DRY_RUN" -eq 1 ]; then
   rsync "${RSYNC_ARGS[@]}" --dry-run "$SRC_DIR"/ "$DEST_DIR"/
 else
   echo "Installing Blanket from $SRC_DIR to $DEST_DIR"
+  # bin/create-admin.php is not on the allowlist above and so is always
+  # slated for deletion, but it (and its parent dir) are www-data-owned
+  # from an older deploy, before ownership hygiene was fixed -- claude
+  # can't delete a file it doesn't own. rsync reports that as exit 23
+  # ("partial transfer due to error"), which under `set -e` used to abort
+  # the whole script *before* the cache-busting stamping step below ever
+  # ran, silently leaving a deploy's index.html/app.js/grid.js/ws.js with
+  # unstamped __DEPLOY_VERSION__ placeholders. Tolerate exit 23
+  # specifically (the actual file content still transfers correctly; only
+  # the stray delete fails) and keep going -- anything else still aborts.
+  set +e
   rsync "${RSYNC_ARGS[@]}" "$SRC_DIR"/ "$DEST_DIR"/
+  rsync_status=$?
+  set -e
+  if [ "$rsync_status" -ne 0 ] && [ "$rsync_status" -ne 23 ]; then
+    echo "rsync failed (exit $rsync_status)" >&2
+    exit "$rsync_status"
+  fi
+  if [ "$rsync_status" -eq 23 ]; then
+    echo "Note: rsync exited 23 (partial transfer) -- likely a www-data-owned leftover claude can't delete (e.g. bin/create-admin.php). Ask fvf to remove it as root; continuing with the rest of the deploy." >&2
+  fi
   # Apache/mod_php run as www-data, which is not a member of the claude
   # group -- files land here owned claude:claude, so without this www-data
   # can't read anything (confirmed: .htaccess unreadable -> Apache 403s
