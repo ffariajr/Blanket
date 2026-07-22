@@ -1462,3 +1462,13 @@ export const FONT_FAMILIES = {
 // free-text -- cell rendering still just does `fmt.fontSize + 'pt'`
 // directly for any of these.
 export const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72];
+
+// What a cell actually renders as when format.fontFamily/fontSize is unset
+// (see _renderCell above: '' falls through to body's own CSS) -- 'sans'
+// matches body's system-ui stack, and 11 is body's --font-size-base
+// (0.95rem, i.e. ~15.2px at a 16px root) converted to the nearest whole
+// point (1px = 0.75pt) and rounded to the closest FONT_SIZES entry. Used
+// by the toolbar to label its font pickers with the selection's real
+// effective value instead of a generic "Default" placeholder.
+export const DEFAULT_FONT_FAMILY = 'sans';
+export const DEFAULT_FONT_SIZE = 11;

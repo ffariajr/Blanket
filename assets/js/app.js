@@ -1,5 +1,5 @@
 import { api, ApiError, setToken, getDisplayName, setDisplayName, isSessionValid, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
-import { Grid, FONT_FAMILIES, FONT_SIZES } from './grid.js?v=__DEPLOY_VERSION__';
+import { Grid, FONT_FAMILIES, FONT_SIZES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE } from './grid.js?v=__DEPLOY_VERSION__';
 import { TabSocket } from './ws.js?v=__DEPLOY_VERSION__';
 
 const root = document.getElementById('app');
@@ -514,8 +514,28 @@ async function renderSheet(spreadsheetId, tabId) {
       }
     },
   };
+  // Reflects the current selection's actual rendered font in the toolbar's
+  // font pickers, instead of a generic "Default font"/"Default size" label
+  // -- Fernando: "remove default size and default font, show the effective
+  // option instead." Falls back to DEFAULT_FONT_FAMILY/DEFAULT_FONT_SIZE
+  // (grid.js) when the selection has no explicit override, matching what
+  // Grid._renderCell actually draws in that case. Referenced here before
+  // fontFamilySelect/fontSizeSelect are declared below (a function
+  // declaration is hoisted) -- safe because it's only ever invoked later,
+  // from onSelectionChange or the one-time call right after the toolbar is
+  // built, by which point those consts already exist.
+  function updateEffectiveFontOptions() {
+    const fmt = grid.getSelectionFormat();
+    const family = fmt.fontFamily || DEFAULT_FONT_FAMILY;
+    fontFamilyDefaultOption.textContent = `Effective font: ${family}`;
+    fontFamilySelect.value = fmt.fontFamily || '';
+    const size = fmt.fontSize || DEFAULT_FONT_SIZE;
+    fontSizeDefaultOption.textContent = `Effective size: ${size}pt`;
+    fontSizeSelect.value = fmt.fontSize ? String(fmt.fontSize) : '';
+  }
   grid.onSelectionChange = (ref) => {
     formulaBar.onSelect(ref);
+    updateEffectiveFontOptions();
     // `socket` (a `const` further down, after Grid's construction) is
     // only ever actually assigned-to during renderSheet's own synchronous
     // execution, which completes before any user interaction could
@@ -569,6 +589,22 @@ async function renderSheet(spreadsheetId, tabId) {
   // Grid already blocks the underlying calls internally when readOnly,
   // but a fully clickable-looking toolbar that silently does nothing on
   // click is exactly the "looks editable, isn't" gap this pass fixes.
+  const fontFamilyDefaultOption = el('option', { value: '' }, `Effective font: ${DEFAULT_FONT_FAMILY}`);
+  const fontFamilySelect = el('select', {
+    class: 'toolbar-select', title: 'Font', disabled: readOnly || null,
+    onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
+  }, [
+    fontFamilyDefaultOption,
+    ...Object.keys(FONT_FAMILIES).map((k) => el('option', { value: k }, k)),
+  ]);
+  const fontSizeDefaultOption = el('option', { value: '' }, `Effective size: ${DEFAULT_FONT_SIZE}pt`);
+  const fontSizeSelect = el('select', {
+    class: 'toolbar-select', title: 'Font size', disabled: readOnly || null,
+    onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),
+  }, [
+    fontSizeDefaultOption,
+    ...FONT_SIZES.map((size) => el('option', { value: String(size) }, String(size))),
+  ]);
   const toolbar = el('div', { class: 'toolbar' }, [
     el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
     el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
@@ -581,21 +617,9 @@ async function renderSheet(spreadsheetId, tabId) {
       class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff', disabled: readOnly || null,
       onchange: (e) => grid.applyFormatToSelection({ bg: e.target.value }),
     }),
-    el('select', {
-      class: 'toolbar-select', title: 'Font', disabled: readOnly || null,
-      onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
-    }, [
-      el('option', { value: '' }, 'Default font'),
-      ...Object.keys(FONT_FAMILIES).map((k) => el('option', { value: k }, k)),
-    ]),
-    el('select', {
-      class: 'toolbar-select', title: 'Font size', disabled: readOnly || null,
-      onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),
-    }, [
-      el('option', { value: '' }, 'Default size'),
-      ...FONT_SIZES.map((size) => el('option', { value: String(size) }, String(size))),
-    ]),
-    el('button', { class: 'btn btn-secondary', title: 'Wrap text', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
+    fontFamilySelect,
+    fontSizeSelect,
+    el('button', { class: 'btn btn-secondary btn-small', title: 'Wrap text', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
     el('button', {
       class: 'btn btn-secondary btn-small', title: 'Merge selected cells', disabled: readOnly || null,
       onclick: () => {
@@ -613,6 +637,7 @@ async function renderSheet(spreadsheetId, tabId) {
     el('div', { class: 'toolbar-spacer' }),
     tabMenuBtn,
   ]);
+  updateEffectiveFontOptions();
 
   // Rename (spreadsheet title), Manage tabs, and Share are all owner-only
   // (TabController's create/rename/reorder/delete now gate on canManage,
