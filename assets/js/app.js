@@ -1,4 +1,4 @@
-import { api, ApiError, getToken, setToken, getDisplayName, setDisplayName, getCurrentUser, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
+import { api, ApiError, setToken, getDisplayName, setDisplayName, isSessionValid, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
 import { Grid, FONT_FAMILIES, FONT_SIZES } from './grid.js?v=__DEPLOY_VERSION__';
 import { TabSocket } from './ws.js?v=__DEPLOY_VERSION__';
 
@@ -29,7 +29,7 @@ function mount(node) {
 }
 
 function isLoggedIn() {
-  return !!getToken();
+  return isSessionValid();
 }
 
 function formatRelativeTime(date) {
@@ -305,13 +305,28 @@ async function renderSheet(spreadsheetId, tabId) {
     ? `#/s/${spreadsheet.guid}/t/${tid}`
     : `#/sheets/${spreadsheetId}/tabs/${tid}`;
 
-  const readOnly = false; // grid itself doesn't know permissions; server rejects unauthorized writes either way
+  // Was hardcoded `false` -- the UI optimistically allowed editing
+  // regardless of actual access and just relied on the server silently
+  // rejecting writes it shouldn't allow, which produces "looks editable,
+  // edits silently have no effect" (Fernando: "if a user is view only,
+  // they should not be able to make edits in their browser"). `my_access`
+  // is server-computed (Blanket\Auth\Permissions::levelFor(), the same
+  // check every write endpoint already enforces) -- fail closed (readOnly)
+  // if it's missing/anything other than owner/edit, including the
+  // `spreadsheet` fetch itself having failed (the pre-existing
+  // permission-edge-case handling above where /tabs loads but
+  // /spreadsheets/{id} doesn't -- safer to assume no edit access than to
+  // assume yes).
+  const readOnly = !spreadsheet || !['owner', 'edit'].includes(spreadsheet.my_access);
   const docData = current.data || { cells: {} };
   const currentTab = tabsRes.tabs.find((t) => t.id === tabId) || null;
   const reload = () => renderSheet(spreadsheetId, tabId);
 
-  const me = getCurrentUser();
-  const canManageAccess = !!spreadsheet && !!me && (me.isAdmin || spreadsheet.owner_id === me.id);
+  // Also server-authoritative now (was re-derived from the client-decoded
+  // JWT, `me.isAdmin || spreadsheet.owner_id === me.id` -- same class of
+  // bug as readOnly above: client-side inference instead of asking the
+  // server what it actually decided).
+  const canManageAccess = !!spreadsheet && spreadsheet.my_access === 'owner';
 
   // --- Status area: connection state and last-saved time are two
   // separate small facts, not one ambiguous word ("what is the
@@ -366,6 +381,7 @@ async function renderSheet(spreadsheetId, tabId) {
   const formulaRefLabel = el('span', { class: 'formula-ref' }, '');
   const formulaInput = el('input', {
     type: 'text', class: 'formula-input', placeholder: 'Select a cell to edit its value or formula',
+    disabled: readOnly || null,
     onkeydown: (e) => {
       if (e.key === 'Enter') { e.preventDefault(); formulaInput.blur(); }
       else if (e.key === 'Escape') { formulaBar.onSelect(grid.selected); formulaInput.blur(); }
@@ -412,43 +428,46 @@ async function renderSheet(spreadsheetId, tabId) {
   // Bold/italic/underline/wrap are real TOGGLES now (read the current
   // selection's format and flip it) -- the old version just always forced
   // the value on, so there was no way to turn formatting back off from the
-  // toolbar.
+  // toolbar. Every write control here gets `disabled: readOnly || null` --
+  // Grid already blocks the underlying calls internally when readOnly,
+  // but a fully clickable-looking toolbar that silently does nothing on
+  // click is exactly the "looks editable, isn't" gap this pass fixes.
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
     el('input', {
-      class: 'btn-color', type: 'color', title: 'Text color',
+      class: 'btn-color', type: 'color', title: 'Text color', disabled: readOnly || null,
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
     }),
     el('input', {
-      class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff',
+      class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff', disabled: readOnly || null,
       onchange: (e) => grid.applyFormatToSelection({ bg: e.target.value }),
     }),
     el('select', {
-      class: 'toolbar-select', title: 'Font',
+      class: 'toolbar-select', title: 'Font', disabled: readOnly || null,
       onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
     }, [
       el('option', { value: '' }, 'Default font'),
       ...Object.keys(FONT_FAMILIES).map((k) => el('option', { value: k }, k)),
     ]),
     el('select', {
-      class: 'toolbar-select', title: 'Font size',
+      class: 'toolbar-select', title: 'Font size', disabled: readOnly || null,
       onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),
     }, [
       el('option', { value: '' }, 'Default size'),
       ...FONT_SIZES.map((size) => el('option', { value: String(size) }, String(size))),
     ]),
-    el('button', { class: 'btn btn-secondary', title: 'Wrap text', onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
+    el('button', { class: 'btn btn-secondary', title: 'Wrap text', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
     el('button', {
-      class: 'btn btn-secondary btn-small', title: 'Merge selected cells',
+      class: 'btn btn-secondary btn-small', title: 'Merge selected cells', disabled: readOnly || null,
       onclick: () => {
         const result = grid.mergeSelection();
         if (!result.ok) alert(result.error);
       },
     }, 'Merge'),
     el('button', {
-      class: 'btn btn-secondary btn-small', title: 'Unmerge',
+      class: 'btn btn-secondary btn-small', title: 'Unmerge', disabled: readOnly || null,
       onclick: () => {
         const result = grid.unmergeSelection();
         if (!result.ok) alert(result.error);
@@ -458,9 +477,15 @@ async function renderSheet(spreadsheetId, tabId) {
     tabMenuBtn,
   ]);
 
+  // Rename (spreadsheet title) requires owner (TabController/
+  // SpreadsheetController::rename both gate on canManage -- owner only);
+  // Manage tabs requires only edit (TabController's create/rename/
+  // reorder/delete all gate on canEdit, same as cell writes) -- both used
+  // to render unconditionally regardless of readOnly/canManageAccess,
+  // same silently-rejected-on-click gap as everything else in this pass.
   const actions = el('div', { class: 'sheet-actions' }, [
-    el('button', { class: 'btn btn-secondary btn-small', onclick: () => showRenameSpreadsheet(spreadsheet, reload) }, 'Rename'),
-    el('button', { class: 'btn btn-secondary btn-small', onclick: () => showManageTabs(spreadsheetId, tabId, reload) }, 'Manage tabs'),
+    canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showRenameSpreadsheet(spreadsheet, reload) }, 'Rename') : null,
+    !readOnly ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showManageTabs(spreadsheetId, tabId, reload) }, 'Manage tabs') : null,
     canManageAccess ? el('button', { class: 'btn btn-secondary btn-small', onclick: () => showShare(spreadsheetId, shareUrl) }, 'Share') : null,
     el('a', { href: '#/sheets', class: 'btn btn-secondary btn-small' }, 'Exit'),
   ]);
@@ -833,12 +858,16 @@ function nativeMenuEscapeItem(grid, x, y) {
 
 /** Right-click on a cell/selection: Cut, Copy, Paste, Clear contents -- the "common menu options" Fernando asked for. Reuses the exact same Ctrl+C/V/Delete logic, not a parallel implementation. */
 function showCellContextMenu(x, y, grid) {
-  const items = [
-    ['Cut', () => grid._cutSelectionToClipboard()],
-    ['Copy', () => grid._copySelectionToClipboard()],
-  ];
+  // Copy is the only one of these that's actually read-only-safe -- Cut
+  // internally copies THEN clears (_cutSelectionToClipboard calls
+  // _clearSelection, which Grid itself blocks when readOnly), so offering
+  // it unconditionally used to mean clicking it in read-only mode copied
+  // fine but silently failed to clear -- the exact "looks available, half
+  // silently does nothing" bug this pass is fixing elsewhere.
+  const items = [['Copy', () => grid._copySelectionToClipboard()]];
   if (!grid.readOnly) {
     items.push(
+      ['Cut', () => grid._cutSelectionToClipboard()],
       ['Paste', () => grid._pasteClipboardAtSelection()],
       ['Clear contents', () => grid._clearSelection()],
     );
@@ -886,17 +915,24 @@ function showHeaderContextMenu(x, y, grid, kind, index) {
 function showTabMenu(anchorEl, { tabId, tabName, grid, onRenamed }) {
   document.querySelectorAll('.tab-menu').forEach((n) => n.remove());
 
-  const menu = el('div', { class: 'tab-menu' }, [
+  // Export/History are read-only-safe (both just read data); Import CSV
+  // and Rename are writes -- excluded outright in read-only mode rather
+  // than left clickable-but-silently-rejected by the server.
+  const items = [
     el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); exportCsv(tabId); } }, 'Export CSV'),
-    el('label', { class: 'tab-menu-item file-btn' }, [
+  ];
+  if (!grid.readOnly) {
+    items.push(el('label', { class: 'tab-menu-item file-btn' }, [
       'Import CSV',
       el('input', {
         type: 'file', accept: '.csv',
         onchange: (e) => { close(); importCsv(tabId, e, grid); },
       }),
-    ]),
-    el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); showHistory(tabId, grid); } }, 'History'),
-    el('button', {
+    ]));
+  }
+  items.push(el('button', { class: 'tab-menu-item', type: 'button', onclick: () => { close(); showHistory(tabId, grid); } }, 'History'));
+  if (!grid.readOnly) {
+    items.push(el('button', {
       class: 'tab-menu-item', type: 'button',
       onclick: async () => {
         close();
@@ -918,8 +954,9 @@ function showTabMenu(anchorEl, { tabId, tabName, grid, onRenamed }) {
           }
         }
       },
-    }, 'Rename tab'),
-  ]);
+    }, 'Rename tab'));
+  }
+  const menu = el('div', { class: 'tab-menu' }, items);
 
   document.body.appendChild(menu);
   const rect = anchorEl.getBoundingClientRect();

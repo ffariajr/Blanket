@@ -171,7 +171,14 @@ export class Grid {
     const prevSelected = this.selected;
     const prevAnchor = this.anchor;
     this.container.innerHTML = '';
-    this.container.className = 'grid-scroll';
+    // .grid-readonly (see app.css) drops the edit-affordance cursor --
+    // cells stay selectable/copiable (Fernando: "Cells need to be
+    // selectable and copiable, but not appear like they are editable"),
+    // this is purely visual, the actual write-blocking is the readOnly
+    // checks throughout this file. Set here (not just once externally)
+    // since _build() re-runs and resets className on every structural
+    // rebuild (merge/unmerge, remote patch, resize, insert/delete).
+    this.container.className = 'grid-scroll' + (this.readOnly ? ' grid-readonly' : '');
     const table = document.createElement('table');
     table.className = 'grid';
     this.table = table;

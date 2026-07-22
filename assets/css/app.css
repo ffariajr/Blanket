@@ -490,6 +490,12 @@ table.grid tbody th { left: 0; z-index: 1; }
 table.grid thead th:first-child { left: 0; z-index: 3; }
 
 table.grid td { cursor: cell; position: relative; }
+/* cursor:cell (a small pencil-adjacent glyph in most browsers) is itself
+   an edit affordance -- a read-only grid still needs to support
+   selecting and copying (see Grid._build()'s .grid-readonly class), just
+   without implying you can type into it. Selection highlighting
+   (td.selected below) stays identical either way. */
+.grid-readonly table.grid td { cursor: default; }
 table.grid td.selected { outline: 2px solid var(--color-accent); outline-offset: -2px; background: var(--color-accent-bg); }
 table.grid td.bold { font-weight: 700; }
 table.grid td.italic { font-style: italic; }

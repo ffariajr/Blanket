@@ -30,29 +30,61 @@ export function setDisplayName(name) {
 }
 
 /**
- * Decodes (does not verify -- the server verifies on every request; this
- * is purely for UI decisions like "is this user the owner, show the Share
- * button") the JWT payload so the client knows who's logged in without an
- * extra round-trip. Mirrors the claim shape Blanket\Auth\Jwt::issue()
- * puts in the token: sub (as a string, see src/Auth/Jwt.php), username,
- * display_name, is_admin.
+ * Decodes (does not verify -- the server verifies on every request) a JWT
+ * payload, returning null if it's malformed OR expired. Checking `exp`
+ * here is the fix for a real bug: this used to just parse the payload
+ * with no expiry check at all, so once a token passed its 12h TTL
+ * (src/Auth/Jwt.php's TTL_SECONDS), the client could keep showing
+ * "logged in as X" indefinitely while the server silently treated every
+ * actual request with that token as anonymous (Authenticator::resolve()
+ * intentionally falls back to anonymous on any verification failure,
+ * expiry included -- that server-side behavior is correct and untouched
+ * here; the bug was the client never learning its belief was wrong).
+ * Clears the stored token the moment expiry is detected, rather than
+ * just treating it as absent for this one call -- there's no reason to
+ * keep a token around once it's provably dead, and leaving it would risk
+ * some other future code path checking getToken() truthiness directly
+ * instead of going through this/isSessionValid() and reintroducing the
+ * same stale-login-state bug.
  */
-export function getCurrentUser() {
-  const token = getToken();
+function decodeValidToken(token) {
   if (!token) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
+  let payload;
   try {
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    return {
-      id: parseInt(payload.sub, 10),
-      username: payload.username,
-      displayName: payload.display_name,
-      isAdmin: !!payload.is_admin,
-    };
+    payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
   } catch {
     return null;
   }
+  if (typeof payload.exp === 'number' && payload.exp <= Date.now() / 1000) {
+    setToken(null);
+    return null;
+  }
+  return payload;
+}
+
+/** Whether there's a token AND it isn't expired -- the canonical "am I logged in" check; isLoggedIn() in app.js is just this. */
+export function isSessionValid() {
+  return decodeValidToken(getToken()) !== null;
+}
+
+/**
+ * UI-facing identity (e.g. "is this user the owner, show the Share
+ * button") derived from the same validated payload as isSessionValid()
+ * above -- mirrors the claim shape Blanket\Auth\Jwt::issue() puts in the
+ * token: sub (as a string, see src/Auth/Jwt.php), username, display_name,
+ * is_admin.
+ */
+export function getCurrentUser() {
+  const payload = decodeValidToken(getToken());
+  if (!payload) return null;
+  return {
+    id: parseInt(payload.sub, 10),
+    username: payload.username,
+    displayName: payload.display_name,
+    isAdmin: !!payload.is_admin,
+  };
 }
 
 /**

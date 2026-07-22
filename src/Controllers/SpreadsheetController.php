@@ -85,6 +85,13 @@ final class SpreadsheetController
             Response::error('Forbidden', 403);
         }
 
+        // The client used to hardcode Grid.readOnly = false and rely
+        // entirely on the server rejecting unauthorized writes -- which
+        // just produces "edits silently have no effect" instead of a UI
+        // that actually reflects access. levelFor() already computes
+        // exactly what the client needs ('owner'|'edit'|'view'|null);
+        // canView() above guarantees non-null here.
+        $spreadsheet['my_access'] = $this->permissions->levelFor($spreadsheet, $user);
         Response::json($spreadsheet);
     }
 
@@ -103,6 +110,7 @@ final class SpreadsheetController
             Response::error('Forbidden', 403);
         }
 
+        $spreadsheet['my_access'] = $this->permissions->levelFor($spreadsheet, $user);
         Response::json($spreadsheet);
     }
 
