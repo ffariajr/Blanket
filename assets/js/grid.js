@@ -5,10 +5,34 @@
 // insertRowsAt/deleteRowsAt/insertColumnsAt/deleteColumnsAt below.
 // Sparse cell data: {"A1": {value, format, merge}}.
 import {
-  isFormula, evaluateFormula, colLetter, parseRef, parseUserInfo,
+  isFormula, evaluateFormula, colLetter, parseRef, parseActionGroup,
   shiftFormulaReferences, shiftReferencesForStructuralChange, extractReferences,
 } from './formulas.js?v=__DEPLOY_VERSION__';
 import { getUserInfoField, setUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
+
+/**
+ * Executors for ACTIONGROUP's action types, keyed by action.type -- the
+ * runtime counterpart to formulas.js's ACTION_ARG_PARSERS (parsing lives
+ * there, execution lives here since it needs Grid's cookie/DOM access).
+ * A new action type is added by adding one entry here and one there,
+ * without touching _runActionGroup. Each executor resolves the action's
+ * value for the current viewer, returning null/undefined if unresolvable
+ * (e.g. the viewer cancelled an inline prompt) -- _runActionGroup skips
+ * writing that action's target cell in that case, but still runs the rest.
+ */
+const ACTION_EXECUTORS = {
+  USERINFO(action) {
+    let value = getUserInfoField(action.infoType);
+    if (!value) {
+      const label = action.infoType === 'email' ? 'Your email address' : 'Your name';
+      const entered = window.prompt(label);
+      if (!entered || !entered.trim()) return null;
+      value = entered.trim();
+      setUserInfoField(action.infoType, value);
+    }
+    return value;
+  },
+};
 
 // Fallback for a document saved before per-tab dimensions existed (no
 // `cols`/`rows` keys at all) -- the old fixed size, so pre-existing data
@@ -580,12 +604,12 @@ export class Grid {
     // the sum of the rows it spans.
     el.appendChild(inner);
 
-    // USERINFO is checked before the normal formula evaluator -- see
-    // parseUserInfo() in formulas.js for why it can't go through
+    // ACTIONGROUP is checked before the normal formula evaluator -- see
+    // parseActionGroup() in formulas.js for why it can't go through
     // evaluateFormula() like SUM etc.
-    const userInfo = parseUserInfo(raw);
-    if (userInfo) {
-      this._renderUserInfoCell(ref, inner, userInfo);
+    const actionGroup = parseActionGroup(raw);
+    if (actionGroup) {
+      this._renderActionGroupCell(ref, inner, actionGroup, cell);
     } else {
       inner.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
     }
@@ -602,87 +626,88 @@ export class Grid {
   }
 
   /**
-   * Renders a cell whose raw value parsed as a USERINFO(...) call (see
-   * parseUserInfo() in formulas.js and CELL_SCHEMA.md for the full design).
-   *
-   * buttonLabel non-empty -> button mode: a clickable button, resolved
-   * on click via _resolveUserInfoButton -- a ONE-SHOT conversion to a
-   * plain literal value (this.cells[ref] no longer holds a USERINFO
-   * formula afterward, ever again for this cell).
-   *
-   * buttonLabel empty -> plain-cell mode: NOT one-shot in the same way,
-   * because autoSaveToCookie needs to keep syncing on every future edit,
-   * not just the first. So instead of collapsing straight to a bare
-   * literal, this converts (still just once, the first time this cell is
-   * ever rendered) to a durable {value, userinfo: {field, autoSaveToCookie}}
-   * shape -- an ordinary editable cell from here on, except setCellValue()
-   * below checks for that lingering `userinfo` marker on every future edit
-   * to keep the cookie in sync. Deliberately mutates this.cells[ref]
-   * directly (same as evaluateFormula's callers never do, but USERINFO
-   * always needs to, per the one-shot-conversion design) -- that mutation
-   * IS what prevents this from re-firing on every later render/rebuild:
-   * once cell.value is a plain string, parseUserInfo() on it returns null
-   * immediately (isFormula() fails first), so this method never runs
-   * again for that ref.
-   *
-   * Firing this.onChange() from inside a render method is unusual (nothing
-   * else here has render-time side effects) but necessary: without
-   * persisting the resolution, reloading the page would just show the raw
-   * =USERINFO(...) formula again, since nothing was ever saved.
+   * Renders a cell whose raw value parsed as an ACTIONGROUP(...) call (see
+   * parseActionGroup() in formulas.js and CELL_SCHEMA.md for the full
+   * design) -- a single button; clicking it runs every action in order (see
+   * _runActionGroup). `hideOnClick` disabling is read from `cell.actionState`
+   * (persisted on the cell, in the shared document -- see _runActionGroup),
+   * not client-side/session state, so every connected viewer sees the same
+   * disabled state, including after a reload/reconnect.
    */
-  _renderUserInfoCell(ref, el, { buttonLabel, field, autoSaveToCookie }) {
-    if (buttonLabel !== '') {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'userinfo-btn';
-      btn.textContent = buttonLabel;
-      btn.disabled = this.readOnly;
-      btn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't start a drag-select under the button
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._resolveUserInfoButton(ref, field);
-      });
-      el.appendChild(btn);
-      return;
-    }
-
-    if (this.readOnly) {
-      // Can't write the resolution back, so just show whatever's
-      // resolvable for display without persisting anything.
-      el.textContent = autoSaveToCookie ? getUserInfoField(field) : '';
-      return;
-    }
-
-    const cookieValue = autoSaveToCookie ? getUserInfoField(field) : '';
-    const nextCell = autoSaveToCookie
-      ? { value: cookieValue, userinfo: { field, autoSaveToCookie: true } }
-      : { value: '' };
-    this.cells[ref] = nextCell;
-    el.textContent = nextCell.value;
-    this.onChange({ cells: { [ref]: nextCell } });
-    this._recalcDependents([ref]);
+  _renderActionGroupCell(ref, el, { buttonText, hideOnClick, actions }, cell) {
+    const clicked = !!(cell && cell.actionState && cell.actionState.clicked);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'actiongroup-btn';
+    btn.textContent = buttonText;
+    btn.disabled = this.readOnly || (hideOnClick && clicked);
+    btn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't start a drag-select under the button
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._runActionGroup(ref, actions, hideOnClick);
+    });
+    el.appendChild(btn);
   }
 
   /**
-   * Button-mode click: resolve `field` for the current viewer and commit
-   * it as the cell's new literal value via the normal setCellValue() path
-   * (same commit path as typing/formula-bar/paste -- not a parallel one).
-   * If unresolvable (e.g. an anonymous viewer, field="email", no cookie
-   * yet), prompts inline -- consistent with the existing first-visit name
-   * prompt pattern elsewhere in this app -- and stores what they enter for
-   * reuse by other USERINFO cells.
+   * Runs every action in an ACTIONGROUP click, in order. Each action's
+   * target cell is written via setCellValue() -- the same commit path as
+   * typing/the formula bar/paste -- so a saveOnEdit watch on that same
+   * target (see _buildActionGroupWatches) also gets a chance to fire (a
+   * no-op in practice: the value being written back to cookie/DB is the
+   * same one that was just read from there). An unresolvable action (e.g.
+   * an anonymous viewer cancelled the inline prompt -- see
+   * ACTION_EXECUTORS.USERINFO) is skipped without aborting the rest.
+   *
+   * hideOnClick's disabled state is a separate, explicit patch to the
+   * ACTIONGROUP cell itself (`actionState`, not `value` -- the formula
+   * stays intact so re-rendering after a reload still shows the same
+   * button, just disabled) -- persisted in the shared document so every
+   * connected viewer sees it, not just the clicker.
    */
-  _resolveUserInfoButton(ref, field) {
+  _runActionGroup(ref, actions, hideOnClick) {
     if (this.readOnly) return;
-    let value = getUserInfoField(field);
-    if (!value) {
-      const label = field === 'email' ? 'Your email address' : 'Your name';
-      const entered = window.prompt(label);
-      if (!entered || !entered.trim()) return; // cancelled/blank -- leave the button as it was
-      value = entered.trim();
-      setUserInfoField(field, value);
+    for (const action of actions) {
+      const executor = ACTION_EXECUTORS[action.type];
+      if (!executor) continue;
+      const result = executor(action);
+      if (result === null || result === undefined) continue;
+      if (this._isCovered(action.cell)) continue;
+      this.setCellValue(action.cell, result);
     }
-    this.setCellValue(ref, value);
+    if (hideOnClick) {
+      const cell = this.cells[ref] || {};
+      this.cells[ref] = { ...cell, actionState: { clicked: true } };
+      this.onChange({ cells: { [ref]: { actionState: { clicked: true } } } });
+      this._renderCell(ref);
+    }
+  }
+
+  /**
+   * Per-tab "which cells are saveOnEdit targets" registry, rebuilt fresh on
+   * every call (same rationale as _buildDependents: cheap at this sheet
+   * size, never goes stale). Scans every ACTIONGROUP formula for USERINFO
+   * actions with saveOnEdit=true and maps their target cell -> infoType.
+   * setCellValue() consults this on every LOCAL edit (see there) -- this is
+   * Fernando's "a change in another cell should be caught by this cell to
+   * trigger the cookie saving": the ACTIONGROUP/USERINFO formula lives in
+   * one cell, but the value a viewer hand-types lands in a *different*
+   * cell (the USERINFO action's target), so the watch has to be built by
+   * looking at every formula on the sheet, not just the edited cell itself.
+   */
+  _buildActionGroupWatches() {
+    const watches = new Map();
+    for (const cell of Object.values(this.cells)) {
+      if (!cell || !isFormula(cell.value)) continue;
+      const actionGroup = parseActionGroup(cell.value);
+      if (!actionGroup) continue;
+      for (const action of actionGroup.actions) {
+        if (action.type === 'USERINFO' && action.saveOnEdit) {
+          watches.set(action.cell, action.infoType);
+        }
+      }
+    }
+    return watches;
   }
 
   /**
@@ -721,6 +746,13 @@ export class Grid {
    * REFERENCED cell -> Set of formula cells that depend on it, which is
    * the direction _recalcDependents needs to walk (starting from "this ref
    * just changed").
+   *
+   * An ACTIONGROUP cell's USERINFO(cell, ...) action refs also show up here
+   * (extractReferences() doesn't distinguish "reads this ref" from "writes
+   * this ref") -- harmless over-inclusion: it just means the ACTIONGROUP
+   * cell's button gets an extra re-render (still showing the same label/
+   * disabled state) when one of its own action targets changes, not an
+   * incorrect one.
    */
   _buildDependents() {
     const dependents = new Map();
@@ -1063,14 +1095,17 @@ export class Grid {
 
   /**
    * Sets a cell's raw value (literal or "=formula") -- shared by in-cell
-   * editing, the formula bar, paste, and USERINFO button-click resolution,
+   * editing, the formula bar, paste, and ACTIONGROUP's action execution,
    * so anything that changes a cell's value goes through one place.
    *
-   * If the cell carries `userinfo: {field, autoSaveToCookie: true}` (set
-   * once by _renderUserInfoCell's plain-mode conversion -- see there for
-   * why that state has to persist rather than being one-shot), every
-   * future edit to it also re-syncs the field's cookie, so e.g. correcting
-   * a mistyped email keeps the remembered value current too.
+   * If `ref` is a saveOnEdit target of some USERINFO action elsewhere on
+   * the sheet (see _buildActionGroupWatches), this also re-syncs that
+   * field's cookie/DB value -- deliberately only for a LOCAL commit (this
+   * is the only caller of setCellValue -- applyRemote's non-structural
+   * cell branch updates this.cells directly and never calls this), since a
+   * value a *different* viewer typed shouldn't get saved into THIS
+   * viewer's own remembered info just because their browser received the
+   * resulting WS patch.
    */
   setCellValue(ref, value) {
     if (this.readOnly || this._isCovered(ref)) return;
@@ -1081,9 +1116,8 @@ export class Grid {
     } else {
       this.cells[ref] = { ...prev, value };
       this.onChange({ cells: { [ref]: { value } } });
-      if (prev.userinfo && prev.userinfo.autoSaveToCookie) {
-        setUserInfoField(prev.userinfo.field, value);
-      }
+      const watchedInfoType = this._buildActionGroupWatches().get(ref);
+      if (watchedInfoType) setUserInfoField(watchedInfoType, value);
     }
     this._renderCell(ref);
     this._recalcDependents([ref]);
@@ -1159,10 +1193,10 @@ export class Grid {
   }
 
   // Routes through setCellValue() (used to inline the same three lines
-  // directly) so paste picks up the userinfo-cookie-sync hook there for
-  // free instead of silently bypassing it -- pasting a new value into a
-  // tracked cell is still "editing that cell going forward" per
-  // CELL_SCHEMA.md's USERINFO semantics, same as typing or the formula bar.
+  // directly) so paste picks up the saveOnEdit watch hook there for free
+  // instead of silently bypassing it -- pasting a new value into a watched
+  // cell is still "editing that cell going forward" per CELL_SCHEMA.md's
+  // ACTIONGROUP/USERINFO semantics, same as typing or the formula bar.
   //
   // origin (optional): the top-left {col,row} of where this TSV was
   // originally copied FROM. When known, a pasted formula value has its
@@ -1231,11 +1265,12 @@ export class Grid {
    * showCellContextMenu in app.js) so there's one place that decides what
    * "clearing a cell" means, not two copies that could drift.
    *
-   * Deliberately doesn't route through setCellValue()/its userinfo-cookie-
-   * sync hook: clearing a cell isn't "the user typed a new value" for that
+   * Deliberately doesn't route through setCellValue()/its saveOnEdit watch
+   * hook: clearing a cell isn't "the user typed a new value" for that
    * field, and syncing an empty string would erase their remembered email/
    * name just because they cleared one cell that happened to display it --
-   * worse than not syncing at all (see CELL_SCHEMA.md, USERINFO cells).
+   * worse than not syncing at all (see CELL_SCHEMA.md, ACTIONGROUP/USERINFO
+   * cells).
    */
   _clearSelection() {
     if (this.readOnly || !this.anchor || !this.selected) return;
@@ -1448,7 +1483,7 @@ export class Grid {
 
     // Cells patch: null every vacated old ref (nothing occupies it anymore
     // -- _diffKeyedMap's first pass), then a CANONICALIZED full value
-    // (explicit null for any of format/merge/userinfo the incoming cell
+    // (explicit null for any of format/merge/actionState the incoming cell
     // doesn't have) for every position whose content actually changed.
     // Canonicalizing matters specifically here, unlike setCellValue()'s
     // deliberately partial {value}-only patches elsewhere: a shift can
@@ -1469,7 +1504,7 @@ export class Grid {
         value: newCell.value,
         format: newCell.format ?? null,
         merge: newCell.merge ?? null,
-        userinfo: newCell.userinfo ?? null,
+        actionState: newCell.actionState ?? null,
       };
     }
     const patch = { cells: cellsPatch };

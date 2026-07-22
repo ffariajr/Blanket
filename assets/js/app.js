@@ -892,7 +892,8 @@ const FORMULA_HELP = [
   { name: 'ABS(value)', desc: 'Absolute value.', example: '=ABS(-5)' },
   { name: 'IF(condition, then, else)', desc: 'condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
   { name: 'CONCAT(...) / CONCATENATE(...)', desc: 'Joins any number of values into one piece of text.', example: '=CONCAT(A1, " ", B1)' },
-  { name: 'USERINFO(buttonLabel, field[, autoSaveToCookie])', desc: 'Not a computed function -- turns the cell into a self-service sign-up button (non-empty buttonLabel, fills in the clicker’s info on click) or a cookie-remembering input (empty buttonLabel, autoSaveToCookie=true). field: "name" or "email".', example: '=USERINFO("Sign Up", "name")' },
+  { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Not a computed function -- renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once. The only action today is USERINFO(...).', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name"), USERINFO(C2, "email"))' },
+  { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'An action for use inside ACTIONGROUP(...), not a standalone formula. Fills `cell` with the clicker’s saved info (from a cookie, or their account if logged in) for infoType: "name" or "email". saveOnEdit=TRUE also saves whatever anyone later types into `cell` by hand, independent of the button.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE))' },
 ];
 
 function showFormulaHelp() {

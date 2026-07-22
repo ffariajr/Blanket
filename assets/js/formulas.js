@@ -21,30 +21,53 @@ export function isFormula(value) {
 }
 
 /**
- * Parses `=USERINFO(buttonLabel, field[, autoSaveToCookie])` specifically.
- * Unlike every other function in this file, USERINFO doesn't reduce to a
- * plain number|string (it changes cell *rendering* -- button vs. plain
- * input -- with side effects tied to the viewer's identity, not spreadsheet
- * data), so it can't go through evaluateFormula()'s Parser/applyFunction
- * path, which only ever returns scalars. grid.js checks this FIRST and
- * only falls through to evaluateFormula() for everything else -- see
- * CELL_SCHEMA.md.
- *
- * Reuses the same tokenize() everything else here uses, so quoted string
- * args parse identically to any other function call (whitespace, escaping
- * quirks, etc. all shared) -- it just extracts the raw args instead of
- * computing a result from them. USERINFO's arguments are always literal
- * strings/booleans, never expressions/refs/ranges, so this doesn't need
- * the full Parser, just a flat walk of the same token stream.
- *
- * @returns {{buttonLabel: string, field: string, autoSaveToCookie: boolean}|null}
- *   null if `formula` isn't a well-formed USERINFO(...) call -- grid.js
- *   falls through to the normal formula evaluator (which will itself
- *   produce #ERROR for a bare `=USERINFO(...)` used incorrectly, e.g.
- *   nested inside another function -- USERINFO is intentionally not in
- *   RANGE_FNS/SCALAR_FNS below, so that's already the correct behavior).
+ * Action-argument parsers for ACTIONGROUP(...) (see parseActionGroup below),
+ * keyed by the action's function name so a second action type can be added
+ * later by adding one more entry here, without touching parseActionGroup
+ * itself. USERINFO is the only one today. Each parser receives the action
+ * call's already-tokenized raw args (`{kind: 'string'|'bool'|'ref', value}`,
+ * in source order) and returns a parsed action descriptor, or null if the
+ * args don't match that action's shape.
  */
-export function parseUserInfo(formula) {
+const ACTION_ARG_PARSERS = {
+  // USERINFO(cell, infoType[, saveOnEdit=false]) -- see CELL_SCHEMA.md.
+  USERINFO(args) {
+    if (args.length < 2 || args.length > 3) return null;
+    if (args[0].kind !== 'ref') return null;
+    if (args[1].kind !== 'string') return null;
+    if (args.length === 3 && args[2].kind !== 'bool') return null;
+    return {
+      type: 'USERINFO',
+      cell: args[0].value,
+      infoType: args[1].value,
+      saveOnEdit: args.length === 3 ? args[2].value : false,
+    };
+  },
+};
+
+/**
+ * Parses `=ACTIONGROUP(buttonText, hideOnClick, action1, action2, ...)`
+ * specifically. Like the USERINFO action it wraps, ACTIONGROUP doesn't
+ * reduce to a plain number|string (it renders a button, not a value, and
+ * clicking it has side effects tied to the viewer's identity, not
+ * spreadsheet data), so it can't go through evaluateFormula()'s Parser --
+ * grid.js checks this FIRST and only falls through to evaluateFormula() for
+ * everything else -- see CELL_SCHEMA.md.
+ *
+ * Reuses the same tokenize() everything else here uses, so quoted-string
+ * args and nested action calls parse identically to any other function call.
+ * Grammar (all literal, no expressions/nesting beyond one level):
+ *   ACTIONGROUP '(' STRING ',' (TRUE|FALSE) (',' actionCall)+ ')'
+ *   actionCall  := IDENT '(' (actionArg (',' actionArg)*)? ')'
+ *   actionArg   := STRING | TRUE | FALSE | REF
+ *
+ * @returns {{buttonText: string, hideOnClick: boolean, actions: object[]}|null}
+ *   null if `formula` isn't a well-formed ACTIONGROUP(...) call, including
+ *   an unrecognized action name -- grid.js falls through to the normal
+ *   formula evaluator (which produces #ERROR, since ACTIONGROUP is
+ *   intentionally not in RANGE_FNS/SCALAR_FNS below).
+ */
+export function parseActionGroup(formula) {
   if (!isFormula(formula)) return null;
   let tokens;
   try {
@@ -52,36 +75,62 @@ export function parseUserInfo(formula) {
   } catch {
     return null;
   }
-  if (tokens.length < 4) return null;
-  if (tokens[0].type !== 'IDENT' || tokens[0].name !== 'USERINFO') return null;
-  if (tokens[1].type !== 'OP' || tokens[1].value !== '(') return null;
+  const isOp = (t, v) => !!t && t.type === 'OP' && t.value === v;
+  const isBool = (t) => !!t && t.type === 'IDENT' && (t.name === 'TRUE' || t.name === 'FALSE');
 
-  const args = [];
+  if (tokens.length < 6) return null;
+  if (tokens[0].type !== 'IDENT' || tokens[0].name !== 'ACTIONGROUP') return null;
+  if (!isOp(tokens[1], '(')) return null;
+
   let i = 2;
-  let expectComma = false;
-  for (; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t.type === 'OP' && t.value === ')') { i++; break; }
-    if (expectComma) {
-      if (t.type !== 'OP' || t.value !== ',') return null;
-      expectComma = false;
-      continue;
-    }
-    if (t.type === 'STRING') { args.push(t.value); expectComma = true; continue; }
-    if (t.type === 'IDENT' && (t.name === 'TRUE' || t.name === 'FALSE')) {
-      args.push(t.name === 'TRUE'); expectComma = true; continue;
-    }
-    return null; // a ref/range/number/nested call -- not a valid USERINFO arg
-  }
-  if (i !== tokens.length) return null; // trailing garbage after the closing paren
-  if (args.length < 2 || args.length > 3) return null;
-  if (typeof args[0] !== 'string' || typeof args[1] !== 'string') return null;
+  if (!tokens[i] || tokens[i].type !== 'STRING') return null;
+  const buttonText = tokens[i].value;
+  i++;
+  if (!isOp(tokens[i], ',')) return null;
+  i++;
+  if (!isBool(tokens[i])) return null;
+  const hideOnClick = tokens[i].name === 'TRUE';
+  i++;
 
-  return {
-    buttonLabel: args[0],
-    field: args[1],
-    autoSaveToCookie: args.length > 2 ? !!args[2] : false,
-  };
+  const actions = [];
+  while (isOp(tokens[i], ',')) {
+    i++;
+    if (!tokens[i] || tokens[i].type !== 'IDENT') return null;
+    const actionName = tokens[i].name;
+    i++;
+    if (!isOp(tokens[i], '(')) return null;
+    i++;
+    const rawArgs = [];
+    let expectComma = false;
+    while (!isOp(tokens[i], ')')) {
+      if (!tokens[i]) return null;
+      if (expectComma) {
+        if (!isOp(tokens[i], ',')) return null;
+        i++;
+        expectComma = false;
+        continue;
+      }
+      const t = tokens[i];
+      if (t.type === 'STRING') rawArgs.push({ kind: 'string', value: t.value });
+      else if (isBool(t)) rawArgs.push({ kind: 'bool', value: t.name === 'TRUE' });
+      else if (t.type === 'REF') rawArgs.push({ kind: 'ref', value: t.ref });
+      else return null; // no numbers/ranges/nested calls inside an action's own args
+      i++;
+      expectComma = true;
+    }
+    i++; // consume the action call's ')'
+    const parseAction = ACTION_ARG_PARSERS[actionName];
+    if (!parseAction) return null;
+    const parsed = parseAction(rawArgs);
+    if (!parsed) return null;
+    actions.push(parsed);
+  }
+  if (actions.length < 1) return null;
+  if (!isOp(tokens[i], ')')) return null;
+  i++;
+  if (i !== tokens.length) return null; // trailing garbage after the closing paren
+
+  return { buttonText, hideOnClick, actions };
 }
 
 /**

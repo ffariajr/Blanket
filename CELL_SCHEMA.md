@@ -15,7 +15,12 @@
       }
     },
     "C1": { "value": "merged origin", "merge": { "rows": 2, "cols": 3 } },
-    "D1": { "value": "fernando@example.com", "userinfo": { "field": "email", "autoSaveToCookie": true } }
+    "A3": {
+      "value": "=ACTIONGROUP(\"Sign me up\", TRUE, USERINFO(B3, \"name\"), USERINFO(C3, \"email\"))",
+      "actionState": { "clicked": true }
+    },
+    "B3": { "value": "Fernando" },
+    "C3": { "value": "fernando@example.com" }
   },
   "columnWidths": { "A": 120, "C": 80 },
   "rowHeights": { "3": 40 },
@@ -38,9 +43,9 @@ a blank cell simply has no key, not an empty entry.
   (variadic string join), plus bare arithmetic (`+ - * /`, parens) and
   comparisons (`= <> < > <= >=`) over cell refs and literals. References
   support `$` column/row locking for copy/paste (see "Cell references and
-  copy/paste" below). `USERINFO(...)` is a formula too, but is NOT one of
-  these functions — it's handled entirely separately (see "USERINFO cells"
-  below) and never reaches `evaluateFormula()`'s Parser.
+  copy/paste" below). `ACTIONGROUP(...)` is a formula too, but is NOT one
+  of these functions — it's handled entirely separately (see "ACTIONGROUP
+  and USERINFO cells" below) and never reaches `evaluateFormula()`'s Parser.
 - `format` (object, optional): `bold`/`italic`/`underline`/`wrap` (bool),
   `color`/`bg` (CSS color string, text/background), `fontFamily` (one of
   the fixed preset keys in `FONT_FAMILIES`, `assets/js/grid.js` — not a
@@ -59,91 +64,104 @@ a blank cell simply has no key, not an empty entry.
   under a merged region. `Grid._computeCoverage()` derives the covered-cell
   set from every cell's `merge` field each render; nothing else stores
   "this cell is covered by that one."
-- `userinfo` (object, optional): `{"field": "name"|"email", "autoSaveToCookie": true}`.
-  Never written directly by a user — it's what a `=USERINFO("", field, true)`
-  formula (see below) converts itself into the first time it's rendered.
-  Marks this cell as one whose value should keep syncing to a cookie on
-  every future edit, not just its initial resolution.
+- `actionState` (object, optional): `{"clicked": true}`. Never written
+  directly by a user — set by `Grid._runActionGroup()` the first time an
+  `ACTIONGROUP(...)` cell with `hideOnClick=TRUE` is clicked (see below).
+  Persisted in the shared document (not client-side/session state) so the
+  button reads as disabled for every connected viewer, including after a
+  reload/reconnect, not just for whoever clicked it.
 
-## USERINFO cells
+## ACTIONGROUP and USERINFO cells
 
-`=USERINFO(buttonLabel, field)` or `=USERINFO(buttonLabel, field, autoSaveToCookie)`
-— for self-service sign-up-sheet style cells ("who's bringing what to the
-potluck," click a button, your name fills in). Parsed by
-`parseUserInfo()` in `assets/js/formulas.js` (reuses the same tokenizer as
-every other formula, so quoted-string args parse identically) and rendered
-specially by `Grid._renderUserInfoCell()` in `assets/js/grid.js` — it's
-checked *before* the normal formula evaluator and never reaches it, because
-unlike `SUM` etc. it doesn't reduce to a plain number/string: it changes
-cell *rendering* (button vs. plain input) and has side effects tied to the
-viewer's identity (cookies), not spreadsheet data.
+`=ACTIONGROUP(buttonText, hideOnClick, action1, action2, ...)` — for
+self-service sign-up-sheet style rows ("who's bringing what to the
+potluck," click a button, your saved info fills in the rest of the row).
+Parsed by `parseActionGroup()` in `assets/js/formulas.js` (reuses the same
+tokenizer as every other formula, so quoted-string args and nested action
+calls parse identically) and rendered specially by
+`Grid._renderActionGroupCell()` in `assets/js/grid.js` — it's checked
+*before* the normal formula evaluator and never reaches it, because unlike
+`SUM` etc. it doesn't reduce to a plain number/string: it renders a button,
+not a value, and clicking it has side effects tied to the viewer's identity
+(cookies/account), not spreadsheet data.
 
-- `buttonLabel` (string): if non-empty, the cell renders as a clickable
-  button showing this text instead of an editable cell.
-- `field`: `"name"` or `"email"` today, designed so a third field could be
-  added later without restructuring (see `getUserInfoField`/
-  `setUserInfoField` in `assets/js/api.js`). `"name"` resolves from the
-  JWT's `display_name` if logged in, else the same `blanket_name` cookie
-  used by the first-visit name prompt elsewhere in this app (deliberately
-  not a second name cookie). `"email"` resolves from a dedicated
-  `blanket_userinfo_email` cookie only — there's no account-level email
-  available client-side (the JWT doesn't carry it, and there's no
-  "fetch my own profile" endpoint), so this cookie *is* the mechanism, not
-  a fallback for one.
-- `autoSaveToCookie` (bool, 3rd arg, defaults `false`): only meaningful
-  when `buttonLabel` is empty (plain-cell mode, below).
+- `buttonText` (string): the button's label.
+- `hideOnClick` (bool): if `TRUE`, the button becomes disabled after being
+  clicked once (see `actionState` above) — permanently, for every viewer,
+  until... nothing; there's no way to re-enable it short of editing the
+  formula itself (e.g. to a fresh cell, or toggling this argument and
+  clearing `actionState`). If `FALSE`, the button stays clickable
+  indefinitely (repeatable).
+- `action1, action2, ...` (one or more, required): each is itself a
+  function call — today only `USERINFO(cell, infoType[, saveOnEdit])` (see
+  below) — executed in order when the button is clicked. Actions are
+  dispatched by name against a small registry (`ACTION_ARG_PARSERS` in
+  `formulas.js`, `ACTION_EXECUTORS` in `grid.js`), so a second action type
+  can be added later without restructuring `ACTIONGROUP` itself.
 
-**Button mode** (`buttonLabel` non-empty): on click, resolve `field` for
-the current viewer. If resolvable, the click is a **one-shot conversion**
-— `Grid.setCellValue()` replaces the cell's value with the resolved
-literal (e.g. `=USERINFO("Sign Up","name")` becomes the literal text
-`"Fernando"`) through the exact same commit path as typing/the formula
-bar/paste. The cell is a completely ordinary cell from that point on;
-there is no lingering connection to `field` or to USERINFO at all (compare
-to plain mode below, where the connection has to persist). If unresolvable
-(e.g. an anonymous viewer, `field="email"`, no cookie yet), prompts inline
-for it, then uses and stores what they enter the same way `autoSaveToCookie`
-would.
+**`USERINFO(cell, infoType[, saveOnEdit=false])`** — not a standalone
+formula; only valid as an action argument inside `ACTIONGROUP(...)`.
 
-**Plain-cell mode** (`buttonLabel` empty, `""`): renders as a normal
-editable cell. The *first* time it's rendered, it converts itself (still
-one-shot — the raw `=USERINFO(...)` formula text is never kept once
-rendered) into `{"value": ..., "userinfo": {"field": ..., "autoSaveToCookie": true}}`
-if `autoSaveToCookie` is true — pre-filling `value` from the field's cookie
-if one already exists (a real committed value the viewer can edit or
-accept, not placeholder ghost text), or leaving `value` empty if not. This
-can't collapse straight to a bare literal the way button mode does,
-because the cookie-sync has to keep working on every *future* edit too,
-not just this first render — so `Grid.setCellValue()` checks for that
-lingering `userinfo` marker on every edit going forward and re-syncs the
-cookie each time (e.g. correcting a mistyped email keeps the remembered
-value current). If `autoSaveToCookie` is `false` (or omitted), the cell
-just converts to a bare empty literal with no marker at all — a completely
-normal cell, no special behavior.
+- `cell`: a plain cell reference (e.g. `B2`) — the *target* this action
+  writes into, ordinarily a different cell than the one holding the
+  `ACTIONGROUP` formula (e.g. the button lives in `A2`, and `USERINFO(B2,
+  ...)`/`USERINFO(C2, ...)` target other cells in that same row).
+- `infoType`: `"name"` or `"email"` today, designed so a third field could
+  be added later without restructuring (see `getUserInfoField`/
+  `setUserInfoField` in `assets/js/api.js`) — unchanged from before this
+  redesign. `"name"` resolves from the JWT's `display_name` if logged in,
+  else the same `blanket_name` cookie used by the first-visit name prompt
+  elsewhere in this app (deliberately not a second name cookie). `"email"`
+  resolves from a dedicated `blanket_userinfo_email` cookie only — there's
+  no account-level email available client-side (the JWT doesn't carry it,
+  and there's no "fetch my own profile" endpoint), so this cookie *is* the
+  mechanism, not a fallback for one.
+- `saveOnEdit` (bool, 3rd arg, defaults `false`): if `TRUE`, `cell` is also
+  *watched* — see below.
 
-Two things this deliberately does NOT do, on purpose: clearing a
-`userinfo`-tracked cell with Delete/Backspace does not clear the cookie
-(routes around `setCellValue()` entirely — see the comment at that call
-site in `grid.js`, clearing one cell's *display* of a value shouldn't
-erase the viewer's *remembered* value); and pasting into a tracked cell
+**On click**, for each action in order: resolve `infoType` for the
+clicking viewer and write it into `cell` via `Grid.setCellValue()` — the
+same commit path as typing/the formula bar/paste, not a parallel one. If
+unresolvable (e.g. an anonymous viewer, `infoType="email"`, no cookie yet),
+prompts inline for it — consistent with the existing first-visit name
+prompt pattern elsewhere in this app — stores what they enter for reuse,
+and then fills `cell` with it; if they cancel, that one action is skipped
+(the rest of the group's actions, and `hideOnClick`, still proceed). If
+`hideOnClick` is `TRUE`, the `ACTIONGROUP` cell itself then gets
+`actionState: {clicked: true}` in a separate patch (the formula stays
+intact — a reload still shows the same button, just disabled).
+
+**`saveOnEdit` — catching a hand-typed edit, not just the button.**
+Fernando's own description of why this exists: "the problem is that a
+change in another cell should be caught by this cell to trigger the cookie
+saving." The `ACTIONGROUP`/`USERINFO` formula lives in one cell, but a
+viewer might instead just type their info directly into the *target* cell
+by hand, bypassing the button entirely — that edit still needs to trigger
+the same cookie/account save. `Grid._buildActionGroupWatches()` scans every
+`ACTIONGROUP` formula on the tab (fresh on every call, same rationale as
+`_buildDependents()` — sheets here are small, so an O(cells) rebuild is
+cheap and can never go stale) and maps each `saveOnEdit=TRUE` action's
+target `cell` to its `infoType`. `Grid.setCellValue()` consults this map on
+every **local** commit and re-syncs the cookie/account for a watched
+target. Deliberately local-only: `applyRemote()`'s non-structural cell
+branch never calls `setCellValue()`, so a value some *other* viewer typed
+(received here as a WS merge patch) never gets saved into *this* viewer's
+own remembered info.
+
+Two things this deliberately does NOT do, on purpose: clearing a watched
+cell with Delete/Backspace does not clear the cookie (`_clearSelection()`
+routes around `setCellValue()` entirely — see the comment at that call
+site in `grid.js`; clearing one cell's *display* of a value shouldn't
+erase the viewer's *remembered* value); and pasting into a watched cell
 *does* sync the cookie (it goes through `setCellValue()`, same as typing).
-
-**Rendering a USERINFO formula never itself gets stuck re-firing**: the
-one-shot conversion mutates `this.cells[ref]` in `Grid`'s local state
-immediately, so any later render of that same ref reads the already-
-converted plain value, not the original formula — `parseUserInfo()`
-returns `null` on a non-formula string before it even checks the function
-name, so `_renderUserInfoCell` simply never runs again for that ref. This
-holds across remote patches and structural rebuilds (merge/unmerge
-elsewhere in the sheet) too, since both go through the same `this.cells`
-state.
 
 **Privacy note, not a bug**: any cell is visible to whoever has view
 access to the spreadsheet, including anonymous viewers if the sheet's
-anonymous policy allows view. A `field="email"` USERINFO cell on a sheet
-with lax anonymous view access broadcasts every signer's email to anyone
-who can view it — inherent to a self-service signup sheet as specified,
-worth being deliberate about per-sheet access when actually using this.
+anonymous policy allows view. An `infoType="email"` USERINFO action on a
+sheet with lax anonymous view access broadcasts every signer's email to
+anyone who can view it — inherent to a self-service signup sheet as
+specified, worth being deliberate about per-sheet access when actually
+using this.
 
 ## Cell references and copy/paste
 
@@ -226,7 +244,7 @@ special handling) — get the common cases right, fall back to `#REF!`
 rather than silently computing something wrong.
 
 The wire patch for a structural change explicitly nulls `format`/`merge`/
-`userinfo` on every repositioned cell that doesn't have them, rather than
+`actionState` on every repositioned cell that doesn't have them, rather than
 omitting those keys the way `setCellValue()`'s partial `{value}`-only
 patches do elsewhere — necessary here specifically, since a shift can land
 a cell on top of a position that previously held *different* content: RFC
