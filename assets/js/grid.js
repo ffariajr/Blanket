@@ -72,6 +72,13 @@ export class Grid {
     this._headerAnchorCol = null;
     this._resizing = null; // {kind: 'col'|'row', key, startPx, startSize, el}
     this.onSelectionChange = null; // set by app.js: (ref) => void, for the formula bar
+    // set by app.js: () => void, called at the end of every _build() --
+    // needed because _build() replaces this.table wholesale (merge/
+    // unmerge, remote merge patches, resize all trigger it), which would
+    // otherwise silently wipe any DOM-level styling app.js applies
+    // directly to cells (e.g. remote-viewer selection highlights) without
+    // this hook telling app.js to reapply it after a rebuild.
+    this.onRebuild = null;
     // In-app clipboard fallback for when the OS Clipboard API is
     // unavailable (non-secure context, permission denied) -- copy/paste
     // still work within the app itself either way.
@@ -313,6 +320,8 @@ export class Grid {
       this.selected = prevSelected;
       this._highlightRange(this.anchor, this.selected);
     }
+
+    if (this.onRebuild) this.onRebuild();
   }
 
   /** ref -> true for every cell covered by another cell's merge (i.e. not the origin). */

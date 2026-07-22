@@ -43,6 +43,29 @@ function formatRelativeTime(date) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+// 2-minute grace period, per Fernando's precise clarification: "green
+// means the website is active, or it is not active but 2 minutes since
+// it was active. Yellow means the user has not closed the web page but
+// they are more than 2 minutes since the page was active." Also used
+// locally (renderSheet's markLocalActive/idleTimer) for when THIS client
+// itself reports going idle to the server -- one constant, one meaning,
+// both directions. Exported (module-level, not buried in renderSheet's
+// closure) so this correctness-critical rule is directly unit-testable
+// rather than only exercisable through a full rendered page.
+export const IDLE_GRACE_MS = 2 * 60 * 1000;
+
+// Active (green) if the server says so, OR if it doesn't but less than
+// IDLE_GRACE_MS has elapsed since last_active_at -- a pure function of
+// elapsed time, not just the raw flag from the last presence broadcast,
+// since a viewer can silently cross from green to yellow with no new
+// message at all (renderSheet's presenceTick re-renders on a timer for
+// exactly this). No elapsed-time text is shown anywhere, per Fernando:
+// "don't report last active time, just show the yellow dot."
+export function viewerIsActive(viewer) {
+  if (viewer.active) return true;
+  return (Date.now() - viewer.last_active_at * 1000) < IDLE_GRACE_MS;
+}
+
 // --- Router -----------------------------------------------------------
 //
 // Canonical, shareable URL for viewing a spreadsheet+tab is a REAL path +
@@ -343,13 +366,92 @@ async function renderSheet(spreadsheetId, tabId) {
     offline: "Real-time collaboration isn't connected right now, but your changes are still being saved automatically -- you're just not seeing other editors live.",
   };
   const connectionEl = el('span', { class: 'status-dot status-connecting', title: STATUS_TOOLTIPS.connecting }, 'Connecting…');
-  const savedEl = el('span', { class: 'status-saved' }, '');
+  // Moved next to the spreadsheet name (Fernando: "the thing about how
+  // long ago the last save was to be next to the spreadsheet name") --
+  // was in .status-row below the topbar, see the mount() call further
+  // down for where it actually sits now.
+  const savedEl = el('span', { class: 'saved-indicator' }, '');
   let lastSavedAt = current.created_at ? new Date(current.created_at.replace(' ', 'T') + 'Z') : null;
   function renderSavedLabel() {
     savedEl.textContent = lastSavedAt ? `Saved ${formatRelativeTime(lastSavedAt)}` : '';
   }
   renderSavedLabel();
   const savedTick = setInterval(renderSavedLabel, 20000);
+
+  // --- Presence: who's viewing this spreadsheet (any tab), their cell
+  // selection, and active/idle state. Fed by the WS server's spreadsheet-
+  // wide presence broadcasts (ws-server/presence.py) -- see renderPresence
+  // below for how a roster entry becomes UI (viewer chip, grid highlight,
+  // tab-bar dot).
+  const presenceListEl = el('div', { class: 'presence-list' });
+  let presenceViewers = [];
+
+  // ref -> true for every cell currently carrying a remote-selection
+  // highlight, so renderPresence can clear stale ones before reapplying
+  // (a viewer's selection can move, another viewer's selection can appear
+  // on a cell that used to be highlighted for someone else, etc.) without
+  // walking the whole grid every time.
+  const remoteHighlightedRefs = new Set();
+
+  function renderRemoteSelections() {
+    for (const ref of remoteHighlightedRefs) {
+      const cellEl = grid._cellEl(ref);
+      if (cellEl) {
+        cellEl.classList.remove('remote-selected');
+        cellEl.style.removeProperty('--remote-color');
+      }
+    }
+    remoteHighlightedRefs.clear();
+    for (const viewer of presenceViewers) {
+      // Only viewers on the tab currently displayed have a selection
+      // meaningful to highlight in THIS grid instance -- someone on
+      // another tab still shows up in the viewer list and the tab-bar
+      // dots below, just not as a cell highlight here.
+      if (viewer.tab_id !== tabId || !viewer.selection) continue;
+      // grid._rangeRefs expands an {anchor,selected} rectangle into every
+      // ref in it (same helper Grid uses internally for its own
+      // selection) -- safe to reuse since this is the same grid instance/
+      // coordinate system the viewer's selection was made in. A ref that
+      // falls on a merge-covered cell has no element (_cellEl returns
+      // null) and is silently skipped, same as everywhere else that walks
+      // a range.
+      for (const ref of grid._rangeRefs(viewer.selection.anchor, viewer.selection.selected)) {
+        const cellEl = grid._cellEl(ref);
+        if (!cellEl) continue;
+        cellEl.classList.add('remote-selected');
+        cellEl.style.setProperty('--remote-color', viewer.color);
+        remoteHighlightedRefs.add(ref);
+      }
+    }
+  }
+
+  function renderPresence() {
+    presenceListEl.textContent = '';
+    for (const viewer of presenceViewers) {
+      const active = viewerIsActive(viewer);
+      presenceListEl.appendChild(el('span', {
+        class: 'presence-viewer' + (viewer.is_anonymous ? ' is-anonymous' : ''),
+      }, [
+        el('span', { class: 'presence-activity-dot ' + (active ? 'is-active' : 'is-idle') }),
+        el('span', { class: 'presence-name', style: `color: ${viewer.color}` }, viewer.name || 'Anonymous'),
+      ]));
+    }
+    for (const [tid, dotsEl] of tabPresenceDotEls) {
+      dotsEl.textContent = '';
+      for (const viewer of presenceViewers) {
+        if (viewer.tab_id === tid) {
+          dotsEl.appendChild(el('span', { class: 'tab-presence-dot', style: `background: ${viewer.color}` }));
+        }
+      }
+    }
+    renderRemoteSelections();
+  }
+
+  // Recomputes active->idle dot color transitions that happen purely from
+  // elapsed time (no new presence broadcast triggers them) -- e.g. a
+  // viewer who went inactive 90s ago is green now, yellow once 2 minutes
+  // have actually passed, with nothing else changing in the meantime.
+  const presenceTick = setInterval(renderPresence, 15000);
 
   const gridContainer = el('div', { class: 'grid-container' });
   const grid = new Grid(gridContainer, {
@@ -403,15 +505,40 @@ async function renderSheet(spreadsheetId, tabId) {
       }
     },
   };
-  grid.onSelectionChange = (ref) => formulaBar.onSelect(ref);
+  grid.onSelectionChange = (ref) => {
+    formulaBar.onSelect(ref);
+    // `socket` (a `const` further down, after Grid's construction) is
+    // only ever actually assigned-to during renderSheet's own synchronous
+    // execution, which completes before any user interaction could
+    // trigger this callback -- Grid's constructor itself never selects
+    // anything, so this never fires until well after `socket` exists.
+    // (A `typeof socket` guard here would be actively wrong, not just
+    // unnecessary: `const`/`let` are in the temporal dead zone until their
+    // declaration line runs, so `typeof` on one throws instead of safely
+    // returning 'undefined' the way it would for a truly undeclared name.)
+    socket.sendSelection(ref ? { anchor: grid.anchor, selected: grid.selected } : null);
+  };
+  // Reapply remote-viewer selection highlights after any structural
+  // rebuild (merge/unmerge, a remote merge-patch, resize) -- _build()
+  // replaces the whole <table>, which would otherwise silently drop the
+  // DOM-level highlighting renderRemoteSelections() applies directly to
+  // cells (see Grid.onRebuild's doc comment in grid.js).
+  grid.onRebuild = () => renderRemoteSelections();
 
+  // tab_id -> its .tab-presence-dots element, so renderPresence() can
+  // refill each tab's dots without rebuilding the whole nav on every
+  // presence broadcast (a presence update is far more frequent than a
+  // tab list change).
+  const tabPresenceDotEls = new Map();
   const tabNav = el('nav', { class: 'tab-nav' });
   tabsRes.tabs.forEach((t) => {
     const isActive = t.id === tabId;
+    const dotsEl = el('span', { class: 'tab-presence-dots' });
+    tabPresenceDotEls.set(t.id, dotsEl);
     tabNav.appendChild(el('a', {
       href: sheetUrl(t.id),
       class: isActive ? 'active' : '',
-    }, t.name));
+    }, [t.name, dotsEl]));
   });
 
   const tabMenuBtn = el('button', { class: 'btn btn-secondary btn-icon', title: 'Tab options' }, '⋮');
@@ -492,10 +619,13 @@ async function renderSheet(spreadsheetId, tabId) {
 
   mount(el('div', { class: 'page sheet-page' }, [
     el('header', { class: 'topbar' }, [
-      el('h1', {}, (spreadsheet && spreadsheet.title) || 'Spreadsheet'),
+      el('div', { class: 'topbar-title' }, [
+        el('h1', {}, (spreadsheet && spreadsheet.title) || 'Spreadsheet'),
+        savedEl,
+      ]),
       actions,
     ]),
-    el('div', { class: 'status-row' }, [connectionEl, savedEl]),
+    el('div', { class: 'status-row' }, [connectionEl, presenceListEl]),
     tabNav,
     toolbar,
     formulaBar.el,
@@ -559,6 +689,16 @@ async function renderSheet(spreadsheetId, tabId) {
       connectionEl.className = 'status-dot status-' + state;
       connectionEl.textContent = live ? 'Live' : status === 'connecting' ? 'Connecting…' : 'Offline';
       connectionEl.title = STATUS_TOOLTIPS[state];
+      // A fresh connection has no idea what this client's active/idle
+      // state is until told -- (re)send it once the socket is actually up
+      // (ws.js's own dedupe on the last value it sent is per-connection,
+      // so a reconnect needs this resent even if the local state itself
+      // hasn't changed since before the drop).
+      if (live) socket.sendPresenceActive(localActive);
+    },
+    onPresence: (viewers) => {
+      presenceViewers = viewers;
+      renderPresence();
     },
   });
   socket.connect();
@@ -566,6 +706,40 @@ async function renderSheet(spreadsheetId, tabId) {
   gridContainer.addEventListener('mousemove', () => {
     socket.sendKeystroke({ at: Date.now() });
   });
+
+  // --- Active/idle detection for THIS client, reported to the server via
+  // presence_active so other viewers see it. Two inputs, per Fernando's
+  // precise clarification: (1) an interaction timer -- 2+ minutes with no
+  // mousemove/keydown/click anywhere on the page means idle; (2) the Page
+  // Visibility API -- the tab being hidden (switched away from/minimized)
+  // means idle immediately, not after the 2-minute grace period, since
+  // there's no ambiguity there the way "hasn't moved the mouse in a
+  // while but the tab IS still focused" has.
+  let localActive = true;
+  let idleTimer = null;
+  function markLocalActive() {
+    localActive = true;
+    socket.sendPresenceActive(true);
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      localActive = false;
+      socket.sendPresenceActive(false);
+    }, IDLE_GRACE_MS);
+  }
+  function onVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      localActive = false;
+      socket.sendPresenceActive(false);
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    } else {
+      markLocalActive();
+    }
+  }
+  document.addEventListener('mousemove', markLocalActive);
+  document.addEventListener('keydown', markLocalActive);
+  document.addEventListener('click', markLocalActive);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  markLocalActive(); // starts the idle timer immediately, and gives onStatus's first 'connected' something to resend
 
   // grid.js suppresses the native browser context menu and dispatches this
   // instead (see Grid._onContextMenu) -- it does the data-layer work
@@ -582,6 +756,12 @@ async function renderSheet(spreadsheetId, tabId) {
 
   currentTeardown = () => {
     clearInterval(savedTick);
+    clearInterval(presenceTick);
+    if (idleTimer) clearTimeout(idleTimer);
+    document.removeEventListener('mousemove', markLocalActive);
+    document.removeEventListener('keydown', markLocalActive);
+    document.removeEventListener('click', markLocalActive);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
     socket.close();
   };
 }

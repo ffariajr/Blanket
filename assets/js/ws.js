@@ -7,15 +7,23 @@ import { getToken, getDisplayName } from './api.js?v=__DEPLOY_VERSION__';
 
 const KEYSTROKE_THROTTLE_MS = 150;
 const EDIT_DEBOUNCE_MS = 400;
+// Selection changes fire on every arrow-key/click/drag-tick -- far more
+// often than edits, but each message is tiny and doesn't touch the
+// document/DB (see presence.py), so a short debounce (not edit's 400ms)
+// is enough to collapse a drag-select's flood of intermediate positions
+// into one send, without making a remote viewer's selection highlight
+// visibly lag behind a deliberate single click.
+const SELECTION_DEBOUNCE_MS = 120;
 
 export class TabSocket {
-  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError }) {
+  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError, onPresence }) {
     this.tabId = tabId;
     this.onState = onState || (() => {});
     this.onRemoteEdit = onRemoteEdit || (() => {});
     this.onRemoteKeystroke = onRemoteKeystroke || (() => {});
     this.onSaved = onSaved || (() => {});
     this.onStatus = onStatus || (() => {});
+    this.onPresence = onPresence || (() => {});
     // Server-side rejections (e.g. "View-only access" when an edit is
     // attempted without edit rights, "Tab not found") used to only reach
     // console.warn below -- the connection itself stays open and the
@@ -29,6 +37,9 @@ export class TabSocket {
     this._pendingPatch = null;
     this._editTimer = null;
     this._lastKeystrokeSent = 0;
+    this._lastActiveSent = null; // null until the first send, so the first real state always goes out even if it's `false`
+    this._pendingSelection = undefined; // undefined = nothing queued; null is itself a valid "no selection" value to send
+    this._selectionTimer = null;
   }
 
   connect() {
@@ -74,6 +85,9 @@ export class TabSocket {
         case 'error':
           console.warn('ws error:', msg.message);
           this.onServerError(msg.message);
+          break;
+        case 'presence':
+          this.onPresence(msg.viewers);
           break;
       }
     });
@@ -122,9 +136,40 @@ export class TabSocket {
     this._send({ type: 'save' });
   }
 
+  // Dedupes on the last value actually sent (not just "did the caller call
+  // this again") so a flapping visibility/interaction signal doesn't spam
+  // the server with redundant presence_active messages -- only a genuine
+  // active<->idle transition sends anything.
+  sendPresenceActive(active) {
+    if (!this.isConnected()) return;
+    if (this._lastActiveSent === active) return;
+    this._lastActiveSent = active;
+    this._send({ type: 'presence_active', active });
+  }
+
+  // Debounced the same shape as queueEdit/_flushEdit above, just a much
+  // shorter window (SELECTION_DEBOUNCE_MS) and no merging -- a selection
+  // fully replaces the previous one, it doesn't accumulate.
+  sendSelection(selection) {
+    this._pendingSelection = selection;
+    if (this._selectionTimer) clearTimeout(this._selectionTimer);
+    this._selectionTimer = setTimeout(() => this._flushSelection(), SELECTION_DEBOUNCE_MS);
+  }
+
   close() {
     this.flushEditNow();
+    if (this._selectionTimer) {
+      clearTimeout(this._selectionTimer);
+      this._flushSelection();
+    }
     if (this.ws) this.ws.close();
+  }
+
+  _flushSelection() {
+    this._selectionTimer = null;
+    if (this._pendingSelection === undefined || !this.isConnected()) return;
+    this._send({ type: 'selection', selection: this._pendingSelection });
+    this._pendingSelection = undefined;
   }
 
   _flushEdit() {

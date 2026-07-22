@@ -208,19 +208,26 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   margin-bottom: var(--space-2);
   flex-wrap: wrap;
 }
-.topbar h1 { margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* h1 no longer gets flex:1 itself -- .topbar-title (h1 + the saved
+   indicator, moved here per Fernando: "the thing about how long ago the
+   last save was to be next to the spreadsheet name") is the flexible
+   element instead, so the two sit together as one unit next to the title
+   rather than the saved indicator living in a separate row below. */
+.topbar-title { display: flex; align-items: baseline; gap: var(--space-2); flex: 1; min-width: 0; }
+.saved-indicator { font-size: var(--font-size-xs); color: var(--color-text-muted); white-space: nowrap; flex-shrink: 0; }
 
 .sheet-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 
-/* Small, separate facts, not one ambiguous word: is the live socket up,
-   and when did this last actually save. Both auto-save paths (WS
-   server-side debounce, REST fallback) already save without a manual
-   trigger -- there is no "Save now" button anymore. */
+/* Connection state (is the live socket up) and who's currently viewing --
+   the "last saved" fact used to live in this row too, moved up next to
+   the title above instead. */
 .status-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   margin-bottom: var(--space-3);
+  flex-wrap: wrap;
 }
 .status-dot {
   display: inline-flex;
@@ -239,10 +246,40 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 .status-dot.status-live::before { background: #16a34a; }
 .status-dot.status-offline::before { background: var(--color-text-muted); }
 .status-dot.status-connecting::before { background: #d97706; }
-.status-saved {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
+
+/* Presence: who's viewing this spreadsheet right now (any tab, not just
+   this one -- see app.js's renderPresence). Each viewer gets a stable
+   per-session color (server-assigned, ws-server/presence.py), reused here
+   for their name text AND for their cell-selection highlight in the grid
+   below, so the same color visually ties a name to a highlighted cell.
+   The activity dot's color is unrelated to that per-person color -- it's
+   just green/yellow for active/idle, same meaning for everyone. */
+.presence-list {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
+.presence-viewer {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+}
+.presence-viewer.is-anonymous .presence-name { font-style: italic; }
+.presence-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+/* Green = active, or idle for less than the 2-minute grace period;
+   yellow = idle for 2+ minutes but still connected (hasn't closed the
+   page) -- see computeViewerActivity() in app.js. No elapsed-time text
+   anywhere, per Fernando: "don't report last active time, just show the
+   yellow dot." */
+.presence-activity-dot.is-active { background: #16a34a; }
+.presence-activity-dot.is-idle { background: #d97706; }
 
 .inline-form { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); }
 .inline-form input { flex: 1; }
@@ -292,6 +329,15 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   font-weight: 600;
   border-color: var(--color-border);
 }
+
+/* Cross-tab presence: "if that user is viewing another tab, they should
+   still appear, but add their color dot to the tab name display they are
+   on" -- rendered on every tab (including the active one, for consistent
+   treatment) since the roster is spreadsheet-wide, not just for the tab
+   currently displayed. */
+.tab-nav a { display: inline-flex; align-items: center; gap: var(--space-1); }
+.tab-presence-dots { display: inline-flex; gap: 2px; }
+.tab-presence-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 
 .toolbar {
   display: flex;
@@ -497,6 +543,18 @@ table.grid td { cursor: cell; position: relative; }
    (td.selected below) stays identical either way. */
 .grid-readonly table.grid td { cursor: default; }
 table.grid td.selected { outline: 2px solid var(--color-accent); outline-offset: -2px; background: var(--color-accent-bg); }
+/* Another viewer's selection -- --remote-color is set inline per cell
+   (app.js's renderPresence(), since each viewer's color is server-
+   assigned per session, not something a stylesheet can know ahead of
+   time). box-shadow (inset), not outline, deliberately: outline is
+   already used by .selected above, and an element only gets one outline
+   -- box-shadow can coexist with it if the local user and a remote viewer
+   both land on the same cell. If more than one remote viewer selects the
+   same cell, the later one in the roster wins the highlight color rather
+   than layering multiple shadows -- acceptable at this app's scale (see
+   CELL_SCHEMA.md / ws-server presence docs), not attempting to render N
+   simultaneous colors on one cell. */
+table.grid td.remote-selected { box-shadow: inset 0 0 0 2px var(--remote-color); }
 table.grid td.bold { font-weight: 700; }
 table.grid td.italic { font-style: italic; }
 table.grid td.underline { text-decoration: underline; }
