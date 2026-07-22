@@ -10,9 +10,13 @@ rather than left silent.
 - **WS server binds `127.0.0.1` only** (`ws-server/server.py`) -- never
   directly reachable from outside, only through Apache's TLS-terminated
   proxy. Confirmed via `ss -tlnp` during deployment.
-- **The `blanket` MySQL user is DML-only** (`SELECT/INSERT/UPDATE/DELETE`,
-  no `CREATE/ALTER/DROP/GRANT`) -- both the PHP app and the WS server use
-  the same scoped-down credential, never anything with DDL rights.
+- ~~**The `blanket` MySQL user is DML-only**~~ -- **incorrect, corrected
+  below (#7).** `SHOW GRANTS` on the live credential returns
+  `GRANT ALL PRIVILEGES ON blanket.* TO 'blanket'@'dogmanjr.net'`, not
+  DML-only. This line was aspirational/wrong when written; left visible
+  with a strikethrough rather than silently deleted, since the same
+  mistake (assuming a hardening step happened because it was written down)
+  is exactly what let install.sh delete live secrets -- see #7.
 - **JWTs live in `localStorage`, not a cookie** -- a malicious third-party
   page can't get a victim's browser to silently attach it to a request
   the way ambient cookie auth would allow. Meaningfully reduces the CSRF/
@@ -80,14 +84,11 @@ with.
 
 ## Worth tightening, lower urgency
 
-**4. Secrets file permissions on the PHP side.** `/var/www/church/blanket/.mysql.env`
-and `.app.env` are currently **world-readable** (`chmod 644`) -- a
-workaround from when I couldn't get `www-data` group read access any
-other way (I'm not a member of that group and can't `chgrp` to it).
-Once you do the planned `chown -R www-data:www-data /var/www`, these
-should be tightened back down to `600` (owner-read-only) -- ownership
-alone will make them unreadable to anyone but `www-data` at that mode,
-same as the WS server's copies already are.
+**4. Secrets file permissions on the PHP side -- done.** Fernando ran
+`chown -R claude:www-data /var/www`, and `install.sh` now explicitly
+`chmod 640`s `.mysql.env`/`.app.env` after every deploy (previously its
+blanket `chmod o+r` on all files was quietly widening them back to `644`
+on every single deploy -- fixed at the same time as #7 below).
 
 **5. No `Origin` header validation on the WS handshake.** Normally a
 real cross-site-WebSocket-hijacking concern, but point 3 above (JWT in
@@ -98,12 +99,32 @@ which are already reachable the same way by anyone who just visits the
 link, Origin check or not. Reasonable to add as defense-in-depth, low
 priority given the actual exposure is small.
 
-**6. No rate-limiting on `POST /api/login`.** Unrelated to the WS
-work specifically, but adjacent enough to mention while on the topic:
-nothing currently throttles repeated login attempts against a given
-username. `fail2ban` is already running on this box (per `MACHINE.md`)
--- worth checking whether it's configured to watch this endpoint's
-failure pattern in the Apache/PHP logs, or adding a rule if not.
+**6. No rate-limiting on `POST /api/login` -- considered, dropped.**
+Fernando decided against adding app-level rate-limiting (weighed a small
+MySQL table against PHP's System V shared-memory primitives; decided the
+feature wasn't worth either). `fail2ban` is already running on this box
+(per `MACHINE.md`) and may already cover login brute-forcing if it's
+watching this endpoint's failure pattern in the Apache/PHP logs -- not
+confirmed either way, and not being pursued further right now.
+
+**7. `install.sh` briefly deleted the live `.mysql.env`/`.app.env` and
+broke production.** When the deploy script was rewritten from a denylist
+to an allowlist (to stop a different leak, see the "Allowlist, not a
+denylist" comment in `install.sh`), `--delete-excluded` was added so past
+leaks would clean themselves up automatically. `.mysql.env`/`.app.env`
+were never meant to be *transferred* by this script (see `deploy/
+README.md` -- they're hand-copied once), but they live in `$DEST_DIR` and
+`src/Config.php` reads them off disk on every single request, not just at
+deploy time. Being excluded from transfer and being deleted are different
+things, and the script conflated them: an `--apply` run deleted both
+files, and every API call started 500ing until they were manually
+restored. Fixed with an explicit rsync `P` (protect) filter rule for both
+paths, ahead of the allowlist, so they're excluded from transfer but
+specifically exempted from `--delete-excluded`. Caught only by chance
+while investigating an unrelated DB-grants question, not by any
+monitoring -- worth keeping in mind that this app currently has no health
+check or alerting of any kind; a mistake like this one is otherwise
+silent until someone happens to look, or a user reports it.
 
 ## Not a concern, but worth knowing
 

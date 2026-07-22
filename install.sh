@@ -44,6 +44,22 @@ RSYNC_ARGS=(
   --no-perms
   --no-owner
   --no-group
+  # .mysql.env/.app.env are deliberately never synced by this script (see
+  # deploy/README.md -- they're hand-copied once, separately) but they
+  # DO live in $DEST_DIR at runtime, and src/Config.php reads them off
+  # disk on every request, not just at deploy time. When --delete-excluded
+  # was added below, these two stopped being merely "not transferred" and
+  # became "actively deleted every deploy" -- exactly the same exclude
+  # pattern that correctly removes a stray leak also correctly nukes a
+  # file this app depends on to run at all if that file isn't also
+  # exempted from deletion specifically. This actually happened: an
+  # --apply run deleted both, and the live site 500'd on every API call
+  # (Config.php had nothing to load) until they were manually restored.
+  # `P` (protect) means "never delete this on the receiving side," which
+  # is exactly the distinction needed: excluded from transfer, protected
+  # from deletion. These must stay ahead of the allowlist below.
+  --filter 'P /.mysql.env'
+  --filter 'P /.app.env'
   # Allowlist, not a denylist: only these paths are ever web-facing. A
   # denylist here once let a stray root-level scratch file (next.txt,
   # containing private notes) sync straight into the public docroot,
@@ -111,7 +127,12 @@ else
   # it doesn't need this fix at all. Don't let those failures abort the
   # script -- only ones claude actually owns can be fixed here anyway.
   find "$DEST_DIR" -mindepth 1 -type d -exec chmod o+rx {} + 2>/dev/null || true
-  find "$DEST_DIR" -mindepth 1 -type f -exec chmod o+r {} + 2>/dev/null || true
+  find "$DEST_DIR" -mindepth 1 -type f ! -name '.mysql.env' ! -name '.app.env' -exec chmod o+r {} + 2>/dev/null || true
+  # Secrets: group-readable (www-data can read them), never world-readable.
+  # .htaccess already blocks *.env by extension regardless, but on-disk
+  # permissions shouldn't rely on that alone -- any local account on this
+  # shared box could otherwise read live DB credentials off disk directly.
+  chmod 640 "$DEST_DIR/.mysql.env" "$DEST_DIR/.app.env" 2>/dev/null || true
 
   # Cache-busting: index.html references assets/{app.js,app.css} with a
   # __DEPLOY_VERSION__ placeholder, and app.js/grid.js/ws.js carry the same
