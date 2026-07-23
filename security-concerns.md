@@ -90,14 +90,24 @@ with.
 blanket `chmod o+r` on all files was quietly widening them back to `644`
 on every single deploy -- fixed at the same time as #7 below).
 
-**5. No `Origin` header validation on the WS handshake.** Normally a
-real cross-site-WebSocket-hijacking concern, but point 3 above (JWT in
-localStorage, not a cookie) already blocks the main exploit path for
-*authenticated* sessions. The remaining exposure is limited to
-spreadsheets that already have anonymous view/edit access turned on --
-which are already reachable the same way by anyone who just visits the
-link, Origin check or not. Reasonable to add as defense-in-depth, low
-priority given the actual exposure is small.
+**5. No `Origin` header validation on the WS handshake -- done.**
+`ws-server/server.py` now passes `origins=[ALLOWED_ORIGIN, None]`
+(`ALLOWED_ORIGIN = "https://church.dogmanjr.net"`) to `serve()` -- the
+`websockets` library's own built-in mechanism for this, not custom logic.
+A connection with a present-but-wrong `Origin` is rejected with HTTP 403
+before the WS upgrade completes. `None` (no `Origin` header at all) is
+explicitly allowed, per the library's own documented rationale: a real
+browser always sends `Origin` on a WS handshake, so a missing header
+can't be the cross-site-hijack vector this guards against -- only a
+wrong one can -- and allowing it keeps non-browser clients (this
+project's own diagnostic scripts, `ws-server/test_client.py`, etc.)
+working exactly as before. Verified against a scratch instance on a
+different port: a forged `Origin` (`https://evil.example.com`) gets
+HTTP 403 before ever reaching `handle_connection`; both a correct
+`Origin` and a missing one complete a full hello/state/new_edit/persist
+round-trip normally. Needs fvf to `rsync` + restart the `blanket-ws`
+systemd service for this to take effect in production -- not live yet
+as of this commit.
 
 **6. No rate-limiting on `POST /api/login` -- considered, dropped.**
 Fernando decided against adding app-level rate-limiting (weighed a small

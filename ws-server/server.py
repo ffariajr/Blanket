@@ -78,6 +78,16 @@ logger = logging.getLogger("blanket.server")
 HOST = "127.0.0.1"
 PORT = 8765
 
+# Cross-Site WebSocket Hijacking defense-in-depth (security-concerns.md #5).
+# `None` is included per the websockets library's own recommendation for
+# this: a real browser always sends Origin on a WS handshake, so a MISSING
+# header can't be the browser-based hijack this guards against -- only a
+# WRONG one can. Allowing None keeps non-browser clients (curl-less test
+# scripts, this project's own diagnostic tooling) working unauthenticated-
+# Origin-wise, same as before this change, while still rejecting any page
+# on another origin trying to open a WS connection here on a victim's behalf.
+ALLOWED_ORIGIN = "https://church.dogmanjr.net"
+
 
 def parse_request(path):
     """Returns (tab_id:int|None, token:str|None)."""
@@ -177,7 +187,7 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _handle_signal)
 
-    async with serve(handle_connection, HOST, PORT):
+    async with serve(handle_connection, HOST, PORT, origins=[ALLOWED_ORIGIN, None]):
         logger.info("listening on ws://%s:%s/ws/tabs/{tab_id}", HOST, PORT)
         await stop.wait()
 
