@@ -931,9 +931,19 @@ const FORMULA_HELP = [
   { name: 'COUNTA(range)', desc: 'Count of non-empty cells in a range (numbers or text).', example: '=COUNTA(A1:A5)' },
   { name: 'ROUND(value, digits)', desc: 'Rounds a value to the given number of decimal digits.', example: '=ROUND(3.14159, 2)' },
   { name: 'ABS(value)', desc: 'Absolute value.', example: '=ABS(-5)' },
-  { name: 'IF(condition, then, else)', desc: 'condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
+  { name: 'IF(condition, then, else)', desc: 'Condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
   { name: 'CONCAT(...) / CONCATENATE(...)', desc: 'Joins any number of values into one piece of text.', example: '=CONCAT(A1, " ", B1)' },
-  { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Not a computed function -- renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once. The only action today is USERINFO(...).', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name"), USERINFO(C2, "email"))' },
+  { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once.', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name"), USERINFO(C2, "email"))' },
+];
+
+// Actions (currently just USERINFO) only make sense as an argument to
+// ACTIONGROUP(...) -- the normal formula evaluator has no case for them
+// (formulas.js throws "unknown function" for anything it doesn't
+// recognize, same as any other typo), so listing one on its own in a
+// cell shows #ERROR rather than doing anything. Kept in a separate list/
+// section from FORMULA_HELP so the help dialog can explain that distinction
+// instead of presenting actions as if they were ordinary functions.
+const ACTION_HELP = [
   { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'Used inside ACTIONGROUP(...). Fills `cell` with the clicker’s saved value for infoType — any name you pick, e.g. "name", "email", "phone". saveOnEdit=TRUE also saves manual edits to `cell`.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE), USERINFO(B3, "phone", TRUE))' },
 ];
 
@@ -951,11 +961,6 @@ function showFormulaHelp() {
     el('div', { class: 'modal-content modal-content-wide' }, [
       el('h2', {}, 'Formulas'),
       el('p', { class: 'muted' }, 'Start a cell with = to enter a formula. Basic arithmetic (+ - * /) and comparisons (= <> < > <= >=) work directly on cell references and numbers, e.g. =A1+B1*2.'),
-      el('div', { class: 'formula-help-list' }, FORMULA_HELP.map((f) => el('div', { class: 'formula-help-item' }, [
-        el('code', {}, f.name),
-        el('p', {}, f.desc),
-        el('code', { class: 'formula-help-example' }, f.example),
-      ]))),
       el('h3', {}, 'Cell references'),
       el('p', {}, [
         'A plain reference like ', el('code', {}, 'A1'), ' shifts when a formula is copied to a new cell, just like Excel/Sheets. Lock a column and/or row with ',
@@ -963,6 +968,19 @@ function showFormulaHelp() {
         el('code', {}, 'A$1'), ' (row locked), ', el('code', {}, '$A$1'), ' (both locked).',
       ]),
       el('p', { class: 'muted' }, 'Example: copying =CONCAT($A1, A$3, B4) from C5 to D6 becomes =CONCAT($A2, B$3, C5) — the $-locked parts stay put, everything else shifts by the same +1 column, +1 row the cell itself moved.'),
+      el('h3', {}, 'Functions'),
+      el('div', { class: 'formula-help-list' }, FORMULA_HELP.map((f) => el('div', { class: 'formula-help-item' }, [
+        el('code', {}, f.name),
+        el('p', {}, f.desc),
+        el('code', { class: 'formula-help-example' }, f.example),
+      ]))),
+      el('h3', {}, 'Actions'),
+      el('p', { class: 'muted' }, 'Actions aren’t standalone formulas — using one by itself in a cell (outside ACTIONGROUP) shows as an error.'),
+      el('div', { class: 'formula-help-list' }, ACTION_HELP.map((f) => el('div', { class: 'formula-help-item' }, [
+        el('code', {}, f.name),
+        el('p', {}, f.desc),
+        el('code', { class: 'formula-help-example' }, f.example),
+      ]))),
     ]),
   ]);
   document.body.appendChild(dialog);
