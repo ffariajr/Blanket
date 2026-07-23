@@ -92,12 +92,24 @@ not a value, and clicking it has side effects tied to the viewer's identity
   formula itself (e.g. to a fresh cell, or toggling this argument and
   clearing `actionState`). If `FALSE`, the button stays clickable
   indefinitely (repeatable).
-- `action1, action2, ...` (one or more, required): each is itself a
-  function call — today only `USERINFO(cell, infoType[, saveOnEdit])` (see
-  below) — executed in order when the button is clicked. Actions are
-  dispatched by name against a small registry (`ACTION_ARG_PARSERS` in
-  `formulas.js`, `ACTION_EXECUTORS` in `grid.js`), so a second action type
-  can be added later without restructuring `ACTIONGROUP` itself.
+- `action1, action2, ...` (zero or more): each is itself a function call —
+  today only `USERINFO(cell, infoType[, saveOnEdit])` (see below) —
+  executed in order when the button is clicked. Actions are dispatched by
+  name against a small registry (`ACTION_ARG_PARSERS` in `formulas.js`,
+  `ACTION_EXECUTORS` in `grid.js`), so a second action type can be added
+  later without restructuring `ACTIONGROUP` itself. Zero actions is valid
+  (a button that does nothing when clicked) — not just an edge case
+  allowed for its own sake: a structural row/column delete that removes an
+  action's target `cell` (see `shiftActionGroupReferences()` in
+  `formulas.js`) drops JUST that action, and if it was the last one
+  remaining, this is what it degrades to, rather than the whole cell
+  becoming `=#REF!`/`#ERROR` and stopping being a button at all. Deleting a
+  row/column containing one action's target must never break the OTHER
+  actions in the same group, or a completely different `ACTIONGROUP` cell
+  elsewhere on the sheet — each action's `cell` reference is shifted/
+  invalidated independently, unlike an ordinary formula's references (see
+  `shiftReferencesForStructuralChange()`'s doc comment for why the two
+  need different handling).
 
 **`USERINFO(cell, infoType[, saveOnEdit=true])`** — not a standalone
 formula; only valid as an action argument inside `ACTIONGROUP(...)`.

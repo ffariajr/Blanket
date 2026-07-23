@@ -6,7 +6,8 @@
 // Sparse cell data: {"A1": {value, format, merge}}.
 import {
   isFormula, evaluateFormula, colLetter, parseRef, parseActionGroup,
-  shiftFormulaReferences, shiftReferencesForStructuralChange, extractReferences,
+  shiftFormulaReferences, shiftReferencesForStructuralChange, shiftActionGroupReferences,
+  extractReferences,
 } from './formulas.js?v=__DEPLOY_VERSION__';
 import { getUserInfoField, setUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
 
@@ -1599,7 +1600,12 @@ export class Grid {
 
       let newCell = cell;
       if (cell && isFormula(cell.value)) {
-        const shifted = shiftReferencesForStructuralChange(cell.value, dimension, boundaryIndex, count, isInsert);
+        // ACTIONGROUP gets its own shifter -- see shiftActionGroupReferences()'s
+        // doc comment for why the generic whole-formula-to-#REF! behavior
+        // below is wrong for it (drops one dead action, not the whole button).
+        const shifted = parseActionGroup(cell.value)
+          ? shiftActionGroupReferences(cell.value, dimension, boundaryIndex, count, isInsert)
+          : shiftReferencesForStructuralChange(cell.value, dimension, boundaryIndex, count, isInsert);
         if (shifted !== cell.value) newCell = { ...cell, value: shifted };
       }
 

@@ -57,7 +57,7 @@ const ACTION_ARG_PARSERS = {
  * Reuses the same tokenize() everything else here uses, so quoted-string
  * args and nested action calls parse identically to any other function call.
  * Grammar (all literal, no expressions/nesting beyond one level):
- *   ACTIONGROUP '(' STRING ',' (TRUE|FALSE) (',' actionCall)+ ')'
+ *   ACTIONGROUP '(' STRING ',' (TRUE|FALSE) (',' actionCall)* ')'
  *   actionCall  := IDENT '(' (actionArg (',' actionArg)*)? ')'
  *   actionArg   := STRING | TRUE | FALSE | REF
  *
@@ -125,7 +125,11 @@ export function parseActionGroup(formula) {
     if (!parsed) return null;
     actions.push(parsed);
   }
-  if (actions.length < 1) return null;
+  // Zero actions is valid (not just "at least one") -- see
+  // shiftActionGroupReferences(): a structural delete can strip every
+  // action out of a group (each one's target cell independently gone),
+  // and the result should still be a working button that does nothing
+  // when clicked, not an invalid formula.
   if (!isOp(tokens[i], ')')) return null;
   i++;
   if (i !== tokens.length) return null; // trailing garbage after the closing paren
@@ -567,6 +571,15 @@ export function shiftFormulaReferences(formula, deltaCols, deltaRows) {
  * engine-grade implementation. Get the common cases right; edge cases
  * fall back to #REF! rather than silently computing something wrong.
  *
+ * NOT used for ACTIONGROUP(...) formulas -- see shiftActionGroupReferences()
+ * below. Grid._transformStructure() picks between the two by checking
+ * parseActionGroup() first. An ACTIONGROUP's nested USERINFO(cell, ...)
+ * references are independent write-targets belonging to separate actions,
+ * not a single formula's inputs -- whole-formula-to-#REF! here would
+ * destroy every OTHER action in the group too just because one of them
+ * happened to reference a row/column that got deleted (a real bug: see
+ * commit history around "another button does not work" for the report).
+ *
  * @param {string} formula
  * @param {'row'|'col'} dimension
  * @param {number} boundaryIndex 0-indexed row/col where the change starts
@@ -617,6 +630,61 @@ export function shiftReferencesForStructuralChange(formula, dimension, boundaryI
     i++;
   }
   return refError ? '=#REF!' : '=' + out;
+}
+
+/**
+ * The ACTIONGROUP(...) counterpart to shiftReferencesForStructuralChange()
+ * above -- reparses the formula into its actions (reusing parseActionGroup,
+ * so this stays correct if a second action type is ever added) and shifts
+ * each USERINFO action's own `cell` reference independently. A reference
+ * that falls inside the deleted range drops JUST that one action -- the
+ * button and its other actions keep working, unlike the generic function's
+ * whole-formula invalidation (correct for an ordinary formula's inputs, far
+ * too destructive for a group of otherwise-unrelated write-targets).
+ *
+ * If every action ends up dropped, returns a still-valid, action-less
+ * ACTIONGROUP (parseActionGroup() allows this -- a button that does nothing
+ * when clicked, rather than the cell silently becoming #REF!/#ERROR and
+ * disappearing as a functioning button entirely).
+ *
+ * @returns {string} unchanged if `formula` isn't a well-formed ACTIONGROUP
+ */
+export function shiftActionGroupReferences(formula, dimension, boundaryIndex, count, isInsert) {
+  const parsed = parseActionGroup(formula);
+  if (!parsed) return formula;
+
+  const shiftCell = (ref) => {
+    const { col, row } = parseRef(ref);
+    const idx = dimension === 'row' ? row : col;
+    let newIdx = idx;
+    if (isInsert) {
+      if (idx >= boundaryIndex) newIdx = idx + count;
+    } else if (idx >= boundaryIndex && idx < boundaryIndex + count) {
+      return null; // this action's target cell no longer exists
+    } else if (idx >= boundaryIndex + count) {
+      newIdx = idx - count;
+    }
+    const newRow = dimension === 'row' ? newIdx : row;
+    const newCol = dimension === 'col' ? newIdx : col;
+    return colLetter(newCol) + (newRow + 1);
+  };
+
+  const survivors = [];
+  for (const action of parsed.actions) {
+    if (action.type !== 'USERINFO') { survivors.push(action); continue; } // no cell ref of its own to shift
+    const newCell = shiftCell(action.cell);
+    if (newCell !== null) survivors.push({ ...action, cell: newCell });
+  }
+  if (survivors.length === parsed.actions.length && survivors.every((a, i) => a === parsed.actions[i])) return formula; // nothing changed
+
+  // Re-serialize: STRING tokens here have no escape syntax (see tokenize()),
+  // and buttonText only ever reached us by having already parsed as one, so
+  // it can't contain an embedded '"' -- plain re-quoting is safe.
+  const actionCalls = survivors.map((a) => {
+    const tail = a.saveOnEdit === false ? ', FALSE' : '';
+    return `USERINFO(${a.cell}, "${a.infoType}"${tail})`;
+  });
+  return `=ACTIONGROUP("${parsed.buttonText}", ${parsed.hideOnClick ? 'TRUE' : 'FALSE'}${actionCalls.length ? ', ' + actionCalls.join(', ') : ''})`;
 }
 
 export function expandRange(startRef, endRef) {
