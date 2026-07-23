@@ -25,7 +25,8 @@ Fernando's request):
 
 ```
 mkdir /var/www/church/blanket-ws
-rsync -a --exclude venv/ --exclude __pycache__/ /home/claude/blanket/ws-server/ /var/www/church/blanket-ws/ws-server/
+rsync -a --no-owner --no-group --exclude venv/ --exclude __pycache__/ /home/claude/blanket/ws-server/ /var/www/church/blanket-ws/ws-server/
+chgrp -R www-data /var/www/church/blanket-ws/ws-server
 cp /home/claude/blanket/.mysql.env /home/claude/blanket/.app.env /var/www/church/blanket-ws/
 chmod 640 /var/www/church/blanket-ws/.mysql.env /var/www/church/blanket-ws/.app.env
 python3 -m venv /var/www/church/blanket-ws/ws-server/venv
@@ -114,6 +115,7 @@ include `?token=<JWT>` from a real login.
 - `install.sh` excludes `db/` and `deploy/` from the PHP deploy sync
   (dev-only tooling, no runtime purpose in the docroot) in addition to the
   existing git/docs/secrets/tests exclusions -- see its comments.
+- **`--no-owner --no-group` (plus a `chgrp -R www-data` after) are load-bearing, not optional.** A plain `rsync -a` preserves the *source's* group (`claude`) instead of letting the destination inherit `www-data` from its setgid parent -- this has broken the running `blanket-ws` systemd service (which runs as `User=www-data`) twice now with the exact same `CHDIR` crash-loop, since `www-data` ends up with zero access to a `claude`-group, `750`-mode `ws-server/` directory. If a future deploy skips these flags and the service starts crash-looping right after, this is almost certainly why -- check `stat -c '%U:%G %a' /var/www/church/blanket-ws/ws-server` before looking anywhere else.
 - If `blanket-ws` needs redeploying after a code change: re-run the rsync
   above (target `/var/www/church/blanket-ws/ws-server/`), then
   `sudo systemctl restart blanket-ws`. No auto-deploy yet, matching the
