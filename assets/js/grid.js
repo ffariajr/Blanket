@@ -1372,11 +1372,22 @@ export class Grid {
     if (navigator.clipboard && navigator.clipboard.readText) {
       navigator.clipboard.readText()
         .then((text) => {
-          // Only trust the origin (for ref-shifting) if what came back is
-          // exactly our own last copy -- different text means it came
-          // from outside the app (or a different copy we didn't track),
-          // so there's no known origin to shift from.
-          const origin = text === this._internalClipboard ? this._internalClipboardOrigin : undefined;
+          // Used to require `text === this._internalClipboard` before
+          // trusting the origin -- but the writeText() in
+          // _copySelectionToClipboard() is async/best-effort with no
+          // ordering guarantee against this readText(), so a Ctrl+C then
+          // immediate Ctrl+V (the normal way anyone copy/pastes) could read
+          // back empty/stale content before the write lands, silently
+          // failing that equality check and disabling ref-shifting on every
+          // same-app paste -- confirmed live, not hypothetical. An empty
+          // read is exactly what that race produces, not what genuinely
+          // different external clipboard content looks like (a real
+          // external copy is essentially never literally ''), so treat
+          // empty the same as a match: trust our own in-memory origin. Only
+          // a non-empty read that actually differs from our last copy means
+          // the clipboard now holds something else (switched apps, copied
+          // something else) -- that's the one case with no known origin.
+          const origin = (!text || text === this._internalClipboard) ? this._internalClipboardOrigin : undefined;
           this._applyTsvAtSelection(text || this._internalClipboard, origin);
         })
         .catch(() => this._applyTsvAtSelection(this._internalClipboard, this._internalClipboardOrigin));
