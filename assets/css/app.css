@@ -291,6 +291,10 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 }
 .sheet-list li:hover, .tab-list li:hover { background: var(--color-bg); }
 .sheet-list a, .tab-list a { text-decoration: none; color: var(--color-text); display: block; }
+/* Duplicate/"Make a copy" button sits beside the link, same row -- matches
+   the .access-list li layout rather than introducing a new pattern. */
+.sheet-list li { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); }
+.sheet-list a { flex: 1; }
 
 .history-list li, .access-list li {
   display: flex;

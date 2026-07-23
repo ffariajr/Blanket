@@ -38,6 +38,7 @@ $router->add('GET', '/api/spreadsheets/{id}', fn (Request $r) => (new Spreadshee
 $router->add('PATCH', '/api/spreadsheets/{id}', fn (Request $r) => (new SpreadsheetController())->rename($r));
 $router->add('DELETE', '/api/spreadsheets/{id}', fn (Request $r) => (new SpreadsheetController())->softDelete($r));
 $router->add('DELETE', '/api/spreadsheets/{id}/purge', fn (Request $r) => (new SpreadsheetController())->hardDelete($r));
+$router->add('POST', '/api/spreadsheets/{id}/duplicate', fn (Request $r) => (new SpreadsheetController())->duplicate($r));
 
 $router->add('GET', '/api/spreadsheets/{spreadsheet_id}/tabs', fn (Request $r) => (new TabController())->index($r));
 $router->add('POST', '/api/spreadsheets/{spreadsheet_id}/tabs', fn (Request $r) => (new TabController())->create($r));

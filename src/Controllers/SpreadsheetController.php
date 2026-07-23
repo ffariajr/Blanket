@@ -9,6 +9,7 @@ use Blanket\Auth\CurrentUser;
 use Blanket\Auth\Permissions;
 use Blanket\Http\Request;
 use Blanket\Http\Response;
+use Blanket\Repositories\AccessRepository;
 use Blanket\Repositories\HistoryRepository;
 use Blanket\Repositories\SpreadsheetRepository;
 use Blanket\Repositories\TabRepository;
@@ -20,6 +21,7 @@ final class SpreadsheetController
         private readonly Permissions $permissions = new Permissions(),
         private readonly TabRepository $tabs = new TabRepository(),
         private readonly HistoryRepository $history = new HistoryRepository(),
+        private readonly AccessRepository $access = new AccessRepository(),
     ) {
     }
 
@@ -31,7 +33,18 @@ final class SpreadsheetController
             // "My spreadsheets" has no meaning for an anonymous visitor.
             Response::error('Authentication required', 401);
         }
-        Response::json(['spreadsheets' => $this->spreadsheets->listForUser($user->id)]);
+
+        // my_access per row, same field show()/byGuid() already compute --
+        // the books-menu list needs it to decide "Duplicate" (owner) vs.
+        // "Make a copy" (edit/view) vs. no button at all.
+        $spreadsheets = array_map(
+            function (array $s) use ($user) {
+                $s['my_access'] = $this->permissions->levelFor($s, $user);
+                return $s;
+            },
+            $this->spreadsheets->listForUser($user->id),
+        );
+        Response::json(['spreadsheets' => $spreadsheets]);
     }
 
     public function create(Request $request): void
@@ -156,6 +169,63 @@ final class SpreadsheetController
         $id = (int) $request->params['id'];
         $this->spreadsheets->hardDelete($id);
         Response::json(['status' => 'ok']);
+    }
+
+    /**
+     * Duplicates a spreadsheet: new id/guid, owner = whoever clicked
+     * Duplicate (Fernando: "a duplicate spreadsheet button... duplicates
+     * the spreadsheet"). Every tab is cloned with the ORIGINAL's current
+     * content as a fresh sequence-1 history row -- the change history
+     * itself is deliberately not copied (Fernando: "not the change
+     * history"), so the copy starts with one clean baseline snapshot, not
+     * someone else's decade of edits.
+     *
+     * canView() is enough to duplicate at all (an editor/viewer can save
+     * their own copy), but `duplicate_sharing` -- copying spreadsheet_access
+     * rows, including the anonymous policy -- is force-disabled unless the
+     * requester is owner/admin (canManage()), regardless of what the
+     * request body claims. A non-owner can't see the sharing list at all
+     * (AccessController already 403s them), so a client-supplied flag
+     * alone can't be trusted to gate copying it -- this mirrors why
+     * TabController's canManage() checks don't trust the client either.
+     */
+    public function duplicate(Request $request): void
+    {
+        $user = Authenticator::resolve($request);
+        if ($user->isAnonymous()) {
+            // No account to set as the copy's owner_id.
+            Response::error('Authentication required', 401);
+        }
+
+        $source = $this->findOrFail((int) $request->params['id']);
+        if (!$this->permissions->canView($source, $user)) {
+            Response::error('Forbidden', 403);
+        }
+
+        $duplicateSharing = (bool) $request->input('duplicate_sharing', false)
+            && $this->permissions->canManage($source, $user);
+
+        $newId = $this->spreadsheets->create($user->id, $source['title'] . ' (copy)');
+
+        foreach ($this->tabs->listForSpreadsheet($source['id']) as $tab) {
+            $newTabId = $this->tabs->create($newId, $tab['name'], $tab['position']);
+            $current = $this->history->current($tab['id']);
+            $this->history->save(
+                $newTabId,
+                $current['data'] ?? ['cells' => (object) []],
+                $user,
+                $request->clientIp(),
+                null,
+            );
+        }
+
+        if ($duplicateSharing) {
+            foreach ($this->access->listForSpreadsheet($source['id']) as $row) {
+                $this->access->grant($newId, $row['user_id'], $row['access_level']);
+            }
+        }
+
+        Response::json(['id' => $newId], 201);
     }
 
     private function findOrFail(int $id): array

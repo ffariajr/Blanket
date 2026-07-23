@@ -157,6 +157,8 @@ export const api = {
   renameSpreadsheet: (id, title) => request('PATCH', `/spreadsheets/${id}`, { title }),
   deleteSpreadsheet: (id) => request('DELETE', `/spreadsheets/${id}`),
   purgeSpreadsheet: (id) => request('DELETE', `/spreadsheets/${id}/purge`),
+  duplicateSpreadsheet: (id, duplicateSharing) =>
+    request('POST', `/spreadsheets/${id}/duplicate`, { duplicate_sharing: duplicateSharing }),
 
   listTabs: (spreadsheetId) => request('GET', `/spreadsheets/${spreadsheetId}/tabs`),
   createTab: (spreadsheetId, name, editorName) =>

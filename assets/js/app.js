@@ -241,7 +241,33 @@ async function renderSheetsList() {
     const { spreadsheets } = await api.listSpreadsheets();
     for (const s of spreadsheets) {
       const link = el('a', { href: s.guid ? `#/s/${s.guid}` : `#/sheets/${s.id}` }, s.title);
-      list.appendChild(el('li', {}, link));
+      const li = el('li', {}, [link]);
+
+      // Owner gets "Duplicate" (asks about sharing settings first); a
+      // logged-in editor/viewer gets "Make a copy" (no dialog -- always
+      // private, since they can't see the sharing list to begin with,
+      // per Permissions::canManage()). Anonymous/no-access: no button --
+      // there's no account to own the resulting copy under.
+      if (s.my_access === 'owner') {
+        li.appendChild(el('button', {
+          class: 'btn btn-small',
+          onclick: async () => {
+            const shareToo = window.confirm("Also duplicate this spreadsheet's sharing settings?");
+            await api.duplicateSpreadsheet(s.id, shareToo);
+            await refresh();
+          },
+        }, 'Duplicate'));
+      } else if (s.my_access === 'edit' || s.my_access === 'view') {
+        li.appendChild(el('button', {
+          class: 'btn btn-small',
+          onclick: async () => {
+            await api.duplicateSpreadsheet(s.id, false);
+            await refresh();
+          },
+        }, 'Make a copy'));
+      }
+
+      list.appendChild(li);
     }
   }
 
