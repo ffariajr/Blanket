@@ -848,7 +848,10 @@ async function showHistory(tabId, grid) {
     }, 'Restore');
     list.appendChild(el('li', {}, [el('span', {}, label), btn]));
   }
-  const dialog = el('div', { class: 'modal' }, [
+  const dialog = el('div', {
+    class: 'modal',
+    onclick: (e) => { if (e.target === dialog) dialog.remove(); },
+  }, [
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'History'),
       list,
@@ -924,7 +927,7 @@ const FORMULA_HELP = [
   { name: 'IF(condition, then, else)', desc: 'condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
   { name: 'CONCAT(...) / CONCATENATE(...)', desc: 'Joins any number of values into one piece of text.', example: '=CONCAT(A1, " ", B1)' },
   { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Not a computed function -- renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once. The only action today is USERINFO(...).', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name"), USERINFO(C2, "email"))' },
-  { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'An action for use inside ACTIONGROUP(...), not a standalone formula. Fills `cell` with the clicker’s saved info (from a cookie, or their account if logged in) for infoType: "name" or "email". saveOnEdit=TRUE also saves whatever anyone later types into `cell` by hand, independent of the button.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE))' },
+  { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'An action for use inside ACTIONGROUP(...), not a standalone formula. Fills `cell` with the clicker’s saved info (from a cookie, or their account if logged in). infoType currently only recognizes "name" or "email" -- any other value is silently ignored rather than an error. saveOnEdit=TRUE also saves whatever anyone later types into `cell` by hand, independent of the button.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE))' },
 ];
 
 function showFormulaHelp() {
@@ -1032,7 +1035,10 @@ async function showShare(spreadsheetId, shareUrl) {
     ]));
   }
 
-  const dialog = el('div', { class: 'modal' }, [
+  const dialog = el('div', {
+    class: 'modal',
+    onclick: (e) => { if (e.target === dialog) dialog.remove(); },
+  }, [
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'Share'),
       shareUrl ? buildShareLinkSection(shareUrl) : null,
@@ -1184,25 +1190,9 @@ function showTabMenu(anchorEl, { tabId, tabName, grid, canManage, onRenamed }) {
   if (canManage) {
     items.push(el('button', {
       class: 'tab-menu-item', type: 'button',
-      onclick: async () => {
+      onclick: () => {
         close();
-        const name = window.prompt('Rename tab', tabName);
-        if (name && name.trim() && name.trim() !== tabName) {
-          // Was a bare unhandled `await api.renameTab(...)` with no
-          // try/catch -- since close() already ran, any failure (network
-          // blip, a permission edge case, anything) surfaced as nothing
-          // happening at all, no error, no feedback. Renaming looking
-          // like it silently "doesn't work" is exactly what that
-          // produces. Matches the try/catch + inline alert pattern
-          // already used elsewhere in this file (e.g. showManageTabs'
-          // create-tab handler) rather than inventing a new one.
-          try {
-            await api.renameTab(tabId, name.trim());
-            onRenamed();
-          } catch {
-            window.alert('Could not rename tab (you may not have permission, or the request failed).');
-          }
-        }
+        showRenameTab(tabId, tabName, onRenamed);
       },
     }, 'Rename tab'));
   }
@@ -1227,7 +1217,10 @@ function showRenameSpreadsheet(spreadsheet, onDone) {
   const input = el('input', { type: 'text', value: (spreadsheet && spreadsheet.title) || '' });
   const error = el('p', { class: 'error hidden' });
 
-  const dialog = el('div', { class: 'modal' }, [
+  const dialog = el('div', {
+    class: 'modal',
+    onclick: (e) => { if (e.target === dialog) dialog.remove(); },
+  }, [
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'Rename spreadsheet'),
       error,
@@ -1243,6 +1236,45 @@ function showRenameSpreadsheet(spreadsheet, onDone) {
             onDone();
           } catch {
             error.textContent = 'Could not rename (you may not have permission).';
+            error.classList.remove('hidden');
+          }
+        },
+      }, [input, el('button', { class: 'btn', type: 'submit' }, 'Save')]),
+      el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Close'),
+    ]),
+  ]);
+  document.body.appendChild(dialog);
+  input.focus();
+  input.select();
+}
+
+// Same styled-dialog pattern as showRenameSpreadsheet above, used by both
+// showTabMenu's quick "Rename tab" item and showManageTabs' per-row Rename
+// button -- was two separate window.prompt() call sites before, now one
+// shared implementation so there's a single place to fix.
+function showRenameTab(tabId, currentName, onDone) {
+  const input = el('input', { type: 'text', value: currentName || '' });
+  const error = el('p', { class: 'error hidden' });
+
+  const dialog = el('div', {
+    class: 'modal',
+    onclick: (e) => { if (e.target === dialog) dialog.remove(); },
+  }, [
+    el('div', { class: 'modal-content' }, [
+      el('h2', {}, 'Rename tab'),
+      error,
+      el('form', {
+        class: 'inline-form',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          const name = input.value.trim();
+          if (!name || name === currentName) { dialog.remove(); return; }
+          try {
+            await api.renameTab(tabId, name);
+            dialog.remove();
+            onDone();
+          } catch {
+            error.textContent = 'Could not rename tab (you may not have permission).';
             error.classList.remove('hidden');
           }
         },
@@ -1313,18 +1345,8 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
           }, '→'),
           el('button', {
             class: 'btn btn-small btn-secondary',
-            onclick: async () => {
-              const name = window.prompt('Rename tab', t.name);
-              if (name && name.trim() && name.trim() !== t.name) {
-                try {
-                  await api.renameTab(t.id, name.trim());
-                  await refresh();
-                  onChanged();
-                } catch {
-                  error.textContent = 'Could not rename tab (you may not have permission).';
-                  error.classList.remove('hidden');
-                }
-              }
+            onclick: () => {
+              showRenameTab(t.id, t.name, async () => { await refresh(); onChanged(); });
             },
           }, 'Rename'),
           tabs.length > 1 ? el('button', {
@@ -1365,7 +1387,10 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
     }, [newName, el('button', { class: 'btn', type: 'submit' }, 'Add tab')]));
   }
 
-  const dialog = el('div', { class: 'modal' }, [
+  const dialog = el('div', {
+    class: 'modal',
+    onclick: (e) => { if (e.target === dialog) dialog.remove(); },
+  }, [
     el('div', { class: 'modal-content' }, [
       el('h2', {}, 'Manage tabs'),
       error,
