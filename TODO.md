@@ -32,11 +32,12 @@ exploit — see security-concerns.md for full detail on each.
   (protocol, `tab_id` routing, auth model), so it could never sensibly be
   shared with a future unrelated site on this box anyway.
 
-- **JWTs land in Apache's access logs** as a URL query parameter on every
-  WS handshake (security-concerns.md #3). Fix given to Fernando to apply as
-  root (a `LogFormat` swapping `%r` for `%m %U %H` on the church vhosts, so
-  future log lines never include the query string) — not yet confirmed
-  applied. Root-only.
+- **JWTs land in Apache's access logs** (security-concerns.md #3) — decided
+  against the `LogFormat` mitigation (never applied, both vhosts confirmed
+  still plain `combined`). Root-fixing this instead: moving the token from
+  the WS URL's query string into the first `hello` message, so it never
+  appears in Apache's logs at all. In progress — check back once that
+  lands before removing this item.
 
 - ~~**No `Origin` header validation on the WS handshake**~~ — done, commit
   `303a435`, live since the `blanket-ws` restart.
