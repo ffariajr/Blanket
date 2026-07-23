@@ -9,7 +9,7 @@ import {
   shiftFormulaReferences, shiftReferencesForStructuralChange, shiftActionGroupReferences,
   extractReferences,
 } from './formulas.js?v=__DEPLOY_VERSION__';
-import { getUserInfoField, setUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
+import { getUserInfoField, setUserInfoField, deleteUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
 
 /**
  * Executors for ACTIONGROUP's action types, keyed by action.type -- the
@@ -1213,6 +1213,8 @@ export class Grid {
     if (value === '') {
       delete this.cells[ref];
       this.onChange({ cells: { [ref]: null } });
+      const watchedInfoType = this._buildActionGroupWatches().get(ref);
+      if (watchedInfoType) deleteUserInfoField(watchedInfoType);
     } else {
       this.cells[ref] = { ...prev, value };
       this.onChange({ cells: { [ref]: { value } } });
@@ -1374,22 +1376,28 @@ export class Grid {
    * showCellContextMenu in app.js) so there's one place that decides what
    * "clearing a cell" means, not two copies that could drift.
    *
-   * Deliberately doesn't route through setCellValue()/its saveOnEdit watch
-   * hook: clearing a cell isn't "the user typed a new value" for that
-   * field, and syncing an empty string would erase their remembered email/
-   * name just because they cleared one cell that happened to display it --
-   * worse than not syncing at all (see CELL_SCHEMA.md, ACTIONGROUP/USERINFO
-   * cells).
+   * Also deletes a cleared cell's saveOnEdit cookie/localStorage if it's a
+   * watched USERINFO target -- Fernando: "when I clear a userinfo cells
+   * contents, I want the cookie deleted, including name." Reversed from
+   * this method's original behavior (leaving the cookie alone, reasoned as
+   * "don't erase their remembered email/name just because they cleared one
+   * cell that happened to display it") -- his explicit call, and it makes
+   * clearing symmetric with typing: setCellValue()'s own empty-string
+   * branch does the same deleteUserInfoField() now, so a watched cell's
+   * cookie always matches what's on screen, blank included.
    */
   _clearSelection() {
     if (this.readOnly || !this.anchor || !this.selected) return;
     const cleared = [];
+    const watches = this._buildActionGroupWatches();
     for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
       if (this.cells[ref]) {
         delete this.cells[ref];
         this.onChange({ cells: { [ref]: null } });
         this._renderCell(ref);
         cleared.push(ref);
+        const watchedInfoType = watches.get(ref);
+        if (watchedInfoType) deleteUserInfoField(watchedInfoType);
       }
     }
     if (cleared.length) this._recalcDependents(cleared);

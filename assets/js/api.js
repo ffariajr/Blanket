@@ -50,6 +50,12 @@ export function setDisplayName(name) {
   document.cookie = `blanket_name=${encodeURIComponent(name)}; path=${APP_BASE}; max-age=${oneYear}; samesite=lax`;
 }
 
+/** Forgets the display name entirely (cookie + localStorage) -- distinct from setDisplayName('') , which would still leave a real (empty-string) cookie behind for getDisplayName()'s cookie-read branch to find. */
+export function clearDisplayName() {
+  localStorage.removeItem(NAME_KEY);
+  document.cookie = `blanket_name=; path=${APP_BASE}; max-age=0; samesite=lax`;
+}
+
 /**
  * Decodes (does not verify -- the server verifies on every request) a JWT
  * payload, returning null if it's malformed OR expired. Checking `exp`
@@ -141,6 +147,23 @@ export function setUserInfoField(field, value) {
   localStorage.setItem(key, value);
   const oneYear = 365 * 24 * 60 * 60;
   document.cookie = `${key}=${encodeURIComponent(value)}; path=${APP_BASE}; max-age=${oneYear}; samesite=lax`;
+}
+
+/**
+ * Forgets a USERINFO field entirely (Fernando: "when I clear a userinfo
+ * cells contents, I want the cookie deleted, including name") -- "name"
+ * goes through clearDisplayName() (same identity setUserInfoField's "name"
+ * branch already writes through), every other field expires its own
+ * blanket_userinfo_<field> cookie and drops the localStorage fallback.
+ */
+export function deleteUserInfoField(field) {
+  if (field === 'name') {
+    clearDisplayName();
+    return;
+  }
+  const key = userInfoStorageKey(field);
+  localStorage.removeItem(key);
+  document.cookie = `${key}=; path=${APP_BASE}; max-age=0; samesite=lax`;
 }
 
 class ApiError extends Error {

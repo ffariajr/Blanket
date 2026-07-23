@@ -172,12 +172,22 @@ branch never calls `setCellValue()`, so a value some *other* viewer typed
 (received here as a WS merge patch) never gets saved into *this* viewer's
 own remembered info.
 
-Two things this deliberately does NOT do, on purpose: clearing a watched
-cell with Delete/Backspace does not clear the cookie (`_clearSelection()`
-routes around `setCellValue()` entirely — see the comment at that call
-site in `grid.js`; clearing one cell's *display* of a value shouldn't
-erase the viewer's *remembered* value); and pasting into a watched cell
-*does* sync the cookie (it goes through `setCellValue()`, same as typing).
+Clearing a watched cell (Delete/Backspace, "Clear contents", or Cut —
+`_clearSelection()` in `grid.js`) *deletes* the cookie for that `infoType`
+(including `"name"`), rather than leaving the old value sitting around —
+Fernando: "when I clear a userinfo cells contents, I want the cookie
+deleted, including name." `setCellValue()`'s own empty-string branch does
+the same thing, so a watched cell's cookie always matches what's on
+screen for it, blank included. Pasting into a watched cell *does* sync the
+cookie to the pasted value (it goes through `setCellValue()`, same as
+typing) — unaffected by this change.
+
+Structurally deleting the row/column a watched cell lives in (as opposed
+to clearing its contents) does NOT delete its cookie today — that path
+(`shiftActionGroupReferences()`, see the `action1, action2, ...` bullet
+above) just drops the dead action, it doesn't know anything about cookies.
+Whether it should, for consistency with the content-clearing behavior
+above, is an open question — not decided yet.
 
 **Privacy note, not a bug**: any cell is visible to whoever has view
 access to the spreadsheet, including anonymous viewers if the sheet's
