@@ -1,15 +1,5 @@
 # TODO
 
-
-## Step 1 - API surface
-
-I want to be able to do the following via API REST:
-	- query my spreadsheets, filter with "TEMPLATE" in the name
-	- duplicate that one with a new name
-	- do a find and replace to replace all placeholder text in every/some cells/rows/cols in one/specific/all tabs
-	- set anonymous sharing settings
-
-
 ## Testing
 
 - **Full exhaustive testing of the mobile version**, in subagents (same
@@ -47,6 +37,5 @@ exploit — see security-concerns.md for full detail on each.
   redacts the query string for `/blanket/ws/`, or a deliberate decision
   that log retention/access is fine as-is. Root-only.
 
-- **No `Origin` header validation on the WS handshake** (security-concerns.md
-  #5). Low priority — the main exploit path is already closed by JWTs
-  living in `localStorage`, not a cookie. Code-level, no root needed.
+- ~~**No `Origin` header validation on the WS handshake**~~ — done, commit
+  `303a435`, live since the `blanket-ws` restart.
