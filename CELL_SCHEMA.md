@@ -86,12 +86,15 @@ not a value, and clicking it has side effects tied to the viewer's identity
 (cookies/account), not spreadsheet data.
 
 - `buttonText` (string): the button's label.
-- `hideOnClick` (bool): if `TRUE`, the button becomes disabled after being
-  clicked once (see `actionState` above) — permanently, for every viewer,
-  until... nothing; there's no way to re-enable it short of editing the
-  formula itself (e.g. to a fresh cell, or toggling this argument and
-  clearing `actionState`). If `FALSE`, the button stays clickable
-  indefinitely (repeatable).
+- `hideOnClick` (bool): if `TRUE`, the button becomes disabled once clicked
+  (see `actionState` above) — but only for as long as at least one of its
+  actions' target cells still holds a value. `actionState.clicked` is never
+  reset to `false` by anything; disabling is computed fresh on every render
+  as `clicked AND at least one tracked target cell is non-empty`, so once
+  every tracked cell is cleared (by hand, or because the row/column holding
+  the button itself is deleted — see the `USERINFO`/target-deletion note
+  below) the button re-enables on its own. If `FALSE`, the button stays
+  clickable indefinitely regardless of any of this (repeatable).
 - `action1, action2, ...` (zero or more): each is itself a function call —
   today only `USERINFO(cell, infoType[, saveOnEdit])` (see below) —
   executed in order when the button is clicked. Actions are dispatched by
@@ -182,12 +185,25 @@ screen for it, blank included. Pasting into a watched cell *does* sync the
 cookie to the pasted value (it goes through `setCellValue()`, same as
 typing) — unaffected by this change.
 
+Exception: if the `ACTIONGROUP` cell that owns the watch is ALSO part of
+the same clear operation (e.g. selecting and deleting a whole row that
+contains both the button and one of its targets), the cookie is left
+alone — Fernando: "deleting a row, or deleting the actiongroup cell should
+prevent this behavior, because the cell with the actiongroup is gone."
+`_buildActionGroupWatches()` records each watch's owning `ACTIONGROUP`
+cell alongside its `infoType`; `_clearSelection()` checks whether that
+owning cell is in the same to-be-cleared set before deleting anything, so
+this doesn't depend on the (arbitrary) order cells happen to be processed
+in.
+
 Structurally deleting the row/column a watched cell lives in (as opposed
-to clearing its contents) does NOT delete its cookie today — that path
-(`shiftActionGroupReferences()`, see the `action1, action2, ...` bullet
-above) just drops the dead action, it doesn't know anything about cookies.
-Whether it should, for consistency with the content-clearing behavior
-above, is an open question — not decided yet.
+to clearing its contents) does NOT delete its cookie — settled, not just
+an open question: that path (`shiftActionGroupReferences()`, see the
+`action1, action2, ...` bullet above) just drops the dead action, and
+Fernando confirmed it should stay that way ("deleting a row... should
+prevent this behavior" — same reasoning as the exception just above, one
+level up: the `ACTIONGROUP` itself going away dissolves the watch, cookie
+or no cookie).
 
 **Privacy note, not a bug**: any cell is visible to whoever has view
 access to the spreadsheet, including anonymous viewers if the sheet's

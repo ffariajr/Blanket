@@ -687,14 +687,26 @@ export class Grid {
    * (persisted on the cell, in the shared document -- see _runActionGroup),
    * not client-side/session state, so every connected viewer sees the same
    * disabled state, including after a reload/reconnect.
+   *
+   * `hideOnClick=TRUE` disabling also requires at least one tracked target
+   * cell to currently hold a value -- Fernando: "when all cells an
+   * actiongroup is tracking get cleared, reset the button... disabled if
+   * any of the tracked cells have a value and it was clicked once."
+   * `actionState.clicked` itself is never reset back to false; this is
+   * computed fresh every render instead, which stays correct for free --
+   * clearing a target cell already re-renders this cell via
+   * _recalcDependents(), since extractReferences() picks up a USERINFO
+   * action's cell ref as a dependency of the ACTIONGROUP formula the same
+   * as any other reference (see _buildDependents()'s own comment).
    */
   _renderActionGroupCell(ref, el, { buttonText, hideOnClick, actions }, cell) {
     const clicked = !!(cell && cell.actionState && cell.actionState.clicked);
+    const anyTrackedValuePresent = actions.some((a) => a.cell && this.cells[a.cell] && this.cells[a.cell].value);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'actiongroup-btn';
     btn.textContent = buttonText;
-    btn.disabled = this.readOnly || (hideOnClick && clicked);
+    btn.disabled = this.readOnly || (hideOnClick && clicked && anyTrackedValuePresent);
     btn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't start a drag-select under the button
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -776,13 +788,17 @@ export class Grid {
    */
   _buildActionGroupWatches() {
     const watches = new Map();
-    for (const cell of Object.values(this.cells)) {
+    for (const [sourceRef, cell] of Object.entries(this.cells)) {
       if (!cell || !isFormula(cell.value)) continue;
       const actionGroup = parseActionGroup(cell.value);
       if (!actionGroup) continue;
       for (const action of actionGroup.actions) {
         if (action.type === 'USERINFO' && action.saveOnEdit) {
-          watches.set(action.cell, action.infoType);
+          // sourceRef travels with the watch (not just infoType) so a
+          // caller clearing multiple cells in one operation can tell
+          // whether the ACTIONGROUP itself is ALSO being removed here --
+          // see _clearSelection().
+          watches.set(action.cell, { infoType: action.infoType, sourceRef });
         }
       }
     }
@@ -1213,13 +1229,13 @@ export class Grid {
     if (value === '') {
       delete this.cells[ref];
       this.onChange({ cells: { [ref]: null } });
-      const watchedInfoType = this._buildActionGroupWatches().get(ref);
-      if (watchedInfoType) deleteUserInfoField(watchedInfoType);
+      const watch = this._buildActionGroupWatches().get(ref);
+      if (watch) deleteUserInfoField(watch.infoType);
     } else {
       this.cells[ref] = { ...prev, value };
       this.onChange({ cells: { [ref]: { value } } });
-      const watchedInfoType = this._buildActionGroupWatches().get(ref);
-      if (watchedInfoType) setUserInfoField(watchedInfoType, value);
+      const watch = this._buildActionGroupWatches().get(ref);
+      if (watch) setUserInfoField(watch.infoType, value);
     }
     this._renderCell(ref);
     this._recalcDependents([ref]);
@@ -1385,22 +1401,33 @@ export class Grid {
    * clearing symmetric with typing: setCellValue()'s own empty-string
    * branch does the same deleteUserInfoField() now, so a watched cell's
    * cookie always matches what's on screen, blank included.
+   *
+   * EXCEPT when the ACTIONGROUP that owns the watch is ALSO in this same
+   * cleared range (e.g. deleting the whole row a button lives in, target
+   * cell included) -- Fernando: "deleting a row, or deleting the
+   * actiongroup cell should prevent this behavior, because the cell with
+   * the actiongroup is gone." The watch relationship is being dissolved
+   * entirely here, not "someone cleared a value while the button is still
+   * live and watching," so no cookie gets touched. Building the full
+   * to-be-cleared set up front (rather than checking this.cells mid-loop)
+   * makes this independent of iteration order -- the source cell may or
+   * may not have been deleted from this.cells yet by the time its target
+   * is reached.
    */
   _clearSelection() {
     if (this.readOnly || !this.anchor || !this.selected) return;
-    const cleared = [];
+    const refs = this._visibleRangeRefs(this.anchor, this.selected).filter((ref) => this.cells[ref]);
+    if (!refs.length) return;
+    const refsBeingCleared = new Set(refs);
     const watches = this._buildActionGroupWatches();
-    for (const ref of this._visibleRangeRefs(this.anchor, this.selected)) {
-      if (this.cells[ref]) {
-        delete this.cells[ref];
-        this.onChange({ cells: { [ref]: null } });
-        this._renderCell(ref);
-        cleared.push(ref);
-        const watchedInfoType = watches.get(ref);
-        if (watchedInfoType) deleteUserInfoField(watchedInfoType);
-      }
+    for (const ref of refs) {
+      delete this.cells[ref];
+      this.onChange({ cells: { [ref]: null } });
+      this._renderCell(ref);
+      const watch = watches.get(ref);
+      if (watch && !refsBeingCleared.has(watch.sourceRef)) deleteUserInfoField(watch.infoType);
     }
-    if (cleared.length) this._recalcDependents(cleared);
+    this._recalcDependents(refs);
   }
 
   /** Right-click "Cut": copy, then clear -- same two operations Ctrl+X would do if this app bound that shortcut. */
