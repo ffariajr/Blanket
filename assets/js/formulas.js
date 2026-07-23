@@ -298,7 +298,7 @@ class Parser {
       if (t && t.type === 'OP' && (t.value === '+' || t.value === '-')) {
         this.next();
         const right = this.parseTerm();
-        left = t.value === '+' ? toNumber(left) + toNumber(right) : toNumber(left) - toNumber(right);
+        left = t.value === '+' ? arithNumber(left) + arithNumber(right) : arithNumber(left) - arithNumber(right);
       } else {
         return left;
       }
@@ -313,10 +313,10 @@ class Parser {
         this.next();
         const right = this.parseFactor();
         if (t.value === '*') {
-          left = toNumber(left) * toNumber(right);
+          left = arithNumber(left) * arithNumber(right);
         } else {
-          if (toNumber(right) === 0) throw new Error('div by zero'); // -> #ERROR at the top level
-          left = toNumber(left) / toNumber(right);
+          if (arithNumber(right) === 0) throw new Error('div by zero'); // -> #ERROR at the top level
+          left = arithNumber(left) / arithNumber(right);
         }
       } else {
         return left;
@@ -435,6 +435,16 @@ function toNumber(v) {
   if (typeof v === 'number') return v;
   const n = parseFloat(v);
   return isNaN(n) ? NaN : n;
+}
+
+// Blank-aware wrapper used only by the +/-/*// operators: a genuinely empty
+// operand (blank cell) should act like 0 (matching how SUM/AVG/etc already
+// treat blanks), but non-numeric text like "hello" must still poison the
+// result as NaN -- toNumber() itself is left untouched since range functions
+// rely on it to filter out blanks via isNaN rather than counting them as 0.
+function arithNumber(v) {
+  if (v === undefined || v === null || v === '') return 0;
+  return toNumber(v);
 }
 
 function toDisplayString(v) {
