@@ -1471,6 +1471,38 @@ export class Grid {
         const shifted = shiftReferencesForStructuralChange(cell.value, dimension, boundaryIndex, count, isInsert);
         if (shifted !== cell.value) newCell = { ...cell, value: shifted };
       }
+
+      // A merge origin whose span (in this dimension) straddles the
+      // boundary needs its own size adjusted, independently of whether
+      // the origin's position moved -- otherwise an insert inside the
+      // span gets silently swallowed (span too small, covers one row/col
+      // short) or a delete inside the span leaves the merge claiming
+      // cells it no longer has (span too big, hiding whatever now sits
+      // underneath it -- _isCovered()/_build() would still treat that ref
+      // as covered and never render a <td> for it). Boundaries strictly
+      // before or after the span are untouched here; only the shift above
+      // applies to those, matching pre-existing behavior.
+      if (cell && cell.merge) {
+        const span = dimension === 'row' ? cell.merge.rows : cell.merge.cols;
+        let newSpan = span;
+        if (isInsert) {
+          if (idx < boundaryIndex && boundaryIndex < idx + span) newSpan = span + count;
+        } else {
+          const overlap = Math.max(0, Math.min(idx + span, boundaryIndex + count) - Math.max(idx, boundaryIndex));
+          if (overlap > 0) newSpan = span - overlap;
+        }
+        if (newSpan !== span) {
+          const base = newCell === cell ? { ...cell } : newCell;
+          if (newSpan <= 1) {
+            // A 1x1 "merge" isn't a merge.
+            const { merge, ...rest } = base;
+            newCell = rest;
+          } else {
+            newCell = { ...base, merge: { ...base.merge, [dimension === 'row' ? 'rows' : 'cols']: newSpan } };
+          }
+        }
+      }
+
       newCells[newRef] = newCell;
     }
 
