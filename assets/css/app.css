@@ -198,6 +198,16 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   overflow: hidden;
 }
 .page.sheet-page > * { flex-shrink: 0; }
+/* .grid-scroll's own flex-shrink:1 (below) has LOWER specificity (one
+   class) than the blanket reset above (two classes, ".page.sheet-page >
+   *"), so despite that rule's comment saying it "re-enables" shrink, the
+   blanket reset was actually still winning -- .grid-scroll grew to fit
+   all of its content instead of being clamped to the viewport, so it had
+   nothing to shrink and therefore nothing to scroll (confirmed live:
+   scrollHeight === clientHeight on a 60-row sheet in a real browser).
+   This explicit override, matching the blanket rule's own specificity,
+   is what actually makes the shrink take effect. */
+.page.sheet-page > .grid-scroll { flex-shrink: 1; }
 
 .topbar {
   display: flex;
