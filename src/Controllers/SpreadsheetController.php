@@ -34,6 +34,11 @@ final class SpreadsheetController
             Response::error('Authentication required', 401);
         }
 
+        // ?title_contains=... : case-insensitive substring filter (Fernando:
+        // "query my spreadsheets, filter with 'TEMPLATE' in the name").
+        // Omitted entirely -> unfiltered, exactly like before this existed.
+        $titleContains = $request->query('title_contains');
+
         // my_access per row, same field show()/byGuid() already compute --
         // the books-menu list needs it to decide "Duplicate" (owner) vs.
         // "Make a copy" (edit/view) vs. no button at all.
@@ -42,7 +47,7 @@ final class SpreadsheetController
                 $s['my_access'] = $this->permissions->levelFor($s, $user);
                 return $s;
             },
-            $this->spreadsheets->listForUser($user->id),
+            $this->spreadsheets->listForUser($user->id, is_string($titleContains) ? $titleContains : null),
         );
         Response::json(['spreadsheets' => $spreadsheets]);
     }
@@ -205,7 +210,13 @@ final class SpreadsheetController
         $duplicateSharing = (bool) $request->input('duplicate_sharing', false)
             && $this->permissions->canManage($source, $user);
 
-        $newId = $this->spreadsheets->create($user->id, $source['title'] . ' (copy)');
+        // Optional custom title (Fernando: "duplicate that one with a new
+        // name") -- falls back to the original auto-generated "(copy)"
+        // suffix when omitted or blank, so existing callers are unaffected.
+        $customTitle = trim((string) $request->input('title', ''));
+        $newTitle = $customTitle !== '' ? $customTitle : $source['title'] . ' (copy)';
+
+        $newId = $this->spreadsheets->create($user->id, $newTitle);
 
         foreach ($this->tabs->listForSpreadsheet($source['id']) as $tab) {
             $newTabId = $this->tabs->create($newId, $tab['name'], $tab['position']);

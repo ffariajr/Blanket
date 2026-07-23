@@ -45,16 +45,32 @@ final class SpreadsheetRepository
      * value can't fill two slots. This is a systemic risk, not a one-off:
      * any query with a repeated :name is broken under this driver config.
      */
-    public function listForUser(int $userId): array
+    /**
+     * $titleContains: case-insensitive substring match (Fernando: "query my
+     * spreadsheets, filter with 'TEMPLATE' in the name"). LOWER() on both
+     * sides rather than relying on the column's collation being
+     * case-insensitive -- correct either way, regardless of how this table
+     * is collated. `%`/`_`/`\` in the search string are escaped so a title
+     * like "50% off" can't be misread as a LIKE wildcard.
+     */
+    public function listForUser(int $userId, ?string $titleContains = null): array
     {
-        $stmt = Db::connection()->prepare(
-            'SELECT DISTINCT s.id, s.guid, s.owner_id, s.title, s.created_at, s.updated_at, s.deleted_at
+        $sql = 'SELECT DISTINCT s.id, s.guid, s.owner_id, s.title, s.created_at, s.updated_at, s.deleted_at
              FROM spreadsheets s
              LEFT JOIN spreadsheet_access a ON a.spreadsheet_id = s.id AND a.user_id = :user_id1
-             WHERE s.deleted_at IS NULL AND (s.owner_id = :user_id2 OR a.id IS NOT NULL)
-             ORDER BY s.updated_at DESC'
-        );
-        $stmt->execute(['user_id1' => $userId, 'user_id2' => $userId]);
+             WHERE s.deleted_at IS NULL AND (s.owner_id = :user_id2 OR a.id IS NOT NULL)';
+        $params = ['user_id1' => $userId, 'user_id2' => $userId];
+
+        if ($titleContains !== null && $titleContains !== '') {
+            $escaped = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $titleContains);
+            $sql .= ' AND LOWER(s.title) LIKE LOWER(:title_contains) ESCAPE \'\\\\\'';
+            $params['title_contains'] = '%' . $escaped . '%';
+        }
+
+        $sql .= ' ORDER BY s.updated_at DESC';
+
+        $stmt = Db::connection()->prepare($sql);
+        $stmt->execute($params);
         return array_map($this->cast(...), $stmt->fetchAll());
     }
 
