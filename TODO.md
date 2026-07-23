@@ -1,5 +1,42 @@
 # TODO
 
+
+## Step 1 - API surface
+
+I want to be able to do the following via API REST:
+	- query my spreadsheets, filter with "TEMPLATE" in the name
+	- duplicate that one with a new name
+	- do a find and replace to replace all placeholder text in every/some cells/rows/cols in one/specific/all tabs
+	- set anonymous sharing settings
+
+
+## Known bugs (not yet fixed, deciding on approach later)
+
+- **Copy/pasting formulas with cell references has a bug.** Fernando hit
+  this but hasn't described the exact symptom/reproduction yet — follow up
+  with him for specifics before attempting a fix. One solution direction
+  he's floated: move cell referencing to a new custom syntax (something
+  like `@#@#`-style) instead of the current Excel-style `A1`/`$A$1`
+  notation, presumably to sidestep whatever ambiguity is causing the bug.
+  This would be a significant change (parser, `shiftFormulaReferences`/
+  `shiftReferencesForStructuralChange`, the help dialog, CELL_SCHEMA.md,
+  and anyone's existing formulas already using `A1`-style refs) — decide
+  on the actual approach once the bug itself is understood, don't jump
+  straight to a syntax change without confirming it's the right fix for
+  whatever's actually broken.
+
+## Testing
+
+- **Full exhaustive testing of the mobile version**, in subagents (same
+  pattern as the earlier desktop-feature testing workflows) — hasn't been
+  done yet. No browser is available on this box (Chromium/Playwright can't
+  be installed without root), so this will need to lean on jsdom harnesses
+  and/or a mobile viewport size passed to whatever DOM simulation is used,
+  plus manual spot-checks by Fernando on an actual phone for anything
+  touch/gesture-specific that can't be faithfully simulated headless.
+
+## Step 2 - Hardening & Cleanup
+
 Final hardening/cleanup backlog. Nothing here is urgent or a known active
 exploit — see security-concerns.md for full detail on each.
 
