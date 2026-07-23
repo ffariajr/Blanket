@@ -541,29 +541,28 @@ async function renderSheet(spreadsheetId, tabId) {
     },
   };
   // Reflects the current selection's actual rendered font in the toolbar's
-  // font pickers, instead of a generic "Default font"/"Default size" label
-  // -- Fernando: "remove default size and default font, show the effective
-  // option instead." Falls back to DEFAULT_FONT_FAMILY/DEFAULT_FONT_SIZE
-  // (grid.js) when the selection has no explicit override, matching what
-  // Grid._renderCell actually draws in that case. Referenced here before
-  // fontFamilySelect/fontSizeSelect are declared below (a function
-  // declaration is hoisted) -- safe because it's only ever invoked later,
-  // from onSelectionChange or the one-time call right after the toolbar is
-  // built, by which point those consts already exist.
+  // font pickers. DEFAULT_FONT_FAMILY ('sans') and DEFAULT_FONT_SIZE (11)
+  // are themselves real entries in FONT_FAMILIES/FONT_SIZES, so "no
+  // explicit override" selects that real option directly (in its normal
+  // sorted list position) instead of a separate injected "Effective font:
+  // sans" placeholder duplicating it -- Fernando: showing both was
+  // redundant, and the injected option always appearing first broke the
+  // sorted ordering regardless of where its value actually sorts. The
+  // blank placeholder option now exists only for the one case a real list
+  // entry genuinely can't represent: a mixed-format selection. Referenced
+  // here before fontFamilySelect/fontSizeSelect are declared below (a
+  // function declaration is hoisted) -- safe because it's only ever
+  // invoked later, from onSelectionChange or the one-time call right
+  // after the toolbar is built, by which point those consts already
+  // exist.
   function updateEffectiveFontOptions() {
     const fmt = grid.getSelectionFormat();
-    // FORMAT_MIXED means the selection spans cells that disagree on this
-    // property -- neither a real font/size nor the default applies to the
-    // whole selection, so say so instead of picking one cell's value to
-    // represent all of them. The <select> itself falls back to the blank
-    // "Effective ..." option in that case too, since none of its concrete
-    // options correctly describes a mixed selection.
-    const family = fmt.fontFamily === FORMAT_MIXED ? 'mixed' : (fmt.fontFamily || DEFAULT_FONT_FAMILY);
-    fontFamilyDefaultOption.textContent = `Effective font: ${family}`;
-    fontFamilySelect.value = fmt.fontFamily && fmt.fontFamily !== FORMAT_MIXED ? fmt.fontFamily : '';
-    const size = fmt.fontSize === FORMAT_MIXED ? 'mixed' : (fmt.fontSize || DEFAULT_FONT_SIZE);
-    fontSizeDefaultOption.textContent = `Effective size: ${size}${fmt.fontSize === FORMAT_MIXED ? '' : 'pt'}`;
-    fontSizeSelect.value = fmt.fontSize && fmt.fontSize !== FORMAT_MIXED ? String(fmt.fontSize) : '';
+    const familyMixed = fmt.fontFamily === FORMAT_MIXED;
+    fontFamilyDefaultOption.textContent = familyMixed ? 'Mixed' : 'Default';
+    fontFamilySelect.value = familyMixed ? '' : (fmt.fontFamily || DEFAULT_FONT_FAMILY);
+    const sizeMixed = fmt.fontSize === FORMAT_MIXED;
+    fontSizeDefaultOption.textContent = sizeMixed ? 'Mixed' : 'Default';
+    fontSizeSelect.value = sizeMixed ? '' : String(fmt.fontSize || DEFAULT_FONT_SIZE);
   }
   grid.onSelectionChange = (ref) => {
     formulaBar.onSelect(ref);
@@ -621,7 +620,7 @@ async function renderSheet(spreadsheetId, tabId) {
   // Grid already blocks the underlying calls internally when readOnly,
   // but a fully clickable-looking toolbar that silently does nothing on
   // click is exactly the "looks editable, isn't" gap this pass fixes.
-  const fontFamilyDefaultOption = el('option', { value: '' }, `Effective font: ${DEFAULT_FONT_FAMILY}`);
+  const fontFamilyDefaultOption = el('option', { value: '' }, 'Default');
   const fontFamilySelect = el('select', {
     class: 'toolbar-select', title: 'Font', disabled: readOnly || null,
     onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
@@ -629,7 +628,7 @@ async function renderSheet(spreadsheetId, tabId) {
     fontFamilyDefaultOption,
     ...Object.keys(FONT_FAMILIES).map((k) => el('option', { value: k }, k)),
   ]);
-  const fontSizeDefaultOption = el('option', { value: '' }, `Effective size: ${DEFAULT_FONT_SIZE}pt`);
+  const fontSizeDefaultOption = el('option', { value: '' }, 'Default');
   const fontSizeSelect = el('select', {
     class: 'toolbar-select', title: 'Font size', disabled: readOnly || null,
     onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),

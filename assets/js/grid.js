@@ -1640,10 +1640,20 @@ export const FORMAT_MIXED = '__mixed__';
 // (per the "keep it simple" scope for this feature) -- font-family/size
 // pickers offer these labels, format stores the label, rendering maps it
 // to a real CSS value here so the mapping only lives in one place.
+// Every stack here is fonts that already ship with common OSes (Windows/
+// mac/Linux) -- no @font-face, no Google Fonts, nothing fetched over the
+// network (Fernando: "include a few other fonts if possible without
+// downloading fonts from google").
 export const FONT_FAMILIES = {
   sans: 'system-ui, sans-serif',
   serif: 'Georgia, "Times New Roman", serif',
   monospace: '"SFMono-Regular", Consolas, monospace',
+  arial: 'Arial, Helvetica, sans-serif',
+  'times new roman': '"Times New Roman", Times, serif',
+  georgia: 'Georgia, serif',
+  'courier new': '"Courier New", Courier, monospace',
+  verdana: 'Verdana, Geneva, sans-serif',
+  'trebuchet ms': '"Trebuchet MS", sans-serif',
 };
 
 // format.fontSize is a plain point-size number now (matches Excel/Word's
