@@ -663,6 +663,11 @@ table.grid th { position: relative; }
 /* Formula help dialog -- reuses .modal/.modal-content, just needs more
    width than the default 480px for a legible function list. */
 .modal-content-wide { max-width: 640px; }
+/* Darker/thicker than .formula-help-item's own 1px border below -- that
+   one separates individual entries within a section, this one separates
+   whole sections (intro/references, Functions, Actions) and needs to read
+   as a stronger break at a glance, not just another item boundary. */
+.formula-help-divider { border: none; border-top: 2px solid var(--color-border-strong); margin: var(--space-4) 0; }
 .formula-help-list { display: flex; flex-direction: column; gap: var(--space-3); }
 .formula-help-item {
   padding-bottom: var(--space-3);

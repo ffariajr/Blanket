@@ -961,19 +961,20 @@ function showFormulaHelp() {
     el('div', { class: 'modal-content modal-content-wide' }, [
       el('h2', {}, 'Formulas'),
       el('p', { class: 'muted' }, 'Start a cell with = to enter a formula. Basic arithmetic (+ - * /) and comparisons (= <> < > <= >=) work directly on cell references and numbers, e.g. =A1+B1*2.'),
-      el('h3', {}, 'Cell references'),
-      el('p', {}, [
+      el('p', { class: 'muted' }, [
         'A plain reference like ', el('code', {}, 'A1'), ' shifts when a formula is copied to a new cell, just like Excel/Sheets. Lock a column and/or row with ',
         el('code', {}, '$'), ' so it stays fixed instead: ', el('code', {}, '$A1'), ' (column locked), ',
         el('code', {}, 'A$1'), ' (row locked), ', el('code', {}, '$A$1'), ' (both locked).',
       ]),
       el('p', { class: 'muted' }, 'Example: copying =CONCAT($A1, A$3, B4) from C5 to D6 becomes =CONCAT($A2, B$3, C5) — the $-locked parts stay put, everything else shifts by the same +1 column, +1 row the cell itself moved.'),
+      el('hr', { class: 'formula-help-divider' }),
       el('h3', {}, 'Functions'),
       el('div', { class: 'formula-help-list' }, FORMULA_HELP.map((f) => el('div', { class: 'formula-help-item' }, [
         el('code', {}, f.name),
         el('p', {}, f.desc),
         el('code', { class: 'formula-help-example' }, f.example),
       ]))),
+      el('hr', { class: 'formula-help-divider' }),
       el('h3', {}, 'Actions'),
       el('p', { class: 'muted' }, 'Actions aren’t standalone formulas — using one by itself in a cell (outside ACTIONGROUP) shows as an error.'),
       el('div', { class: 'formula-help-list' }, ACTION_HELP.map((f) => el('div', { class: 'formula-help-item' }, [
