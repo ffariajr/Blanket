@@ -50,9 +50,34 @@ final class CsvController
         $cells = $this->rowsToCells($rows);
         $editorName = $request->input('editor_name');
 
+        // cols/rows live inside the history document, not the tabs table
+        // (see CELL_SCHEMA.md, "cols / rows"), so HistoryRepository::save()'s
+        // full-document replace would silently drop them if we only passed
+        // ['cells' => ...] -- fetch the tab's current document first and
+        // carry its cols/rows forward, growing (never shrinking) to fit the
+        // imported CSV if it's larger than the current grid.
+        $current = $this->history->current($tabId);
+        $currentData = $current['data'] ?? null;
+        // A document saved before cols/rows existed has neither key --
+        // Grid falls back to LEGACY_COLS/LEGACY_ROWS (30x100, see grid.js)
+        // in that case, so match that fallback here rather than the newer
+        // 6x20 default, which would otherwise shrink a legacy tab's grid.
+        $currentCols = (is_object($currentData) && isset($currentData->cols)) ? (int) $currentData->cols : 30;
+        $currentRows = (is_object($currentData) && isset($currentData->rows)) ? (int) $currentData->rows : 100;
+
+        $neededRows = count($rows);
+        $neededCols = 0;
+        foreach ($rows as $row) {
+            $neededCols = max($neededCols, count($row));
+        }
+
         $sequence = $this->history->save(
             $tabId,
-            ['cells' => (object) $cells],
+            [
+                'cells' => (object) $cells,
+                'cols' => max($currentCols, $neededCols),
+                'rows' => max($currentRows, $neededRows),
+            ],
             $user,
             $request->clientIp(),
             is_string($editorName) ? $editorName : null,
