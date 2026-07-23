@@ -29,11 +29,11 @@ I want to be able to do the following via API REST:
 
 - **Full exhaustive testing of the mobile version**, in subagents (same
   pattern as the earlier desktop-feature testing workflows) — hasn't been
-  done yet. No browser is available on this box (Chromium/Playwright can't
-  be installed without root), so this will need to lean on jsdom harnesses
-  and/or a mobile viewport size passed to whatever DOM simulation is used,
-  plus manual spot-checks by Fernando on an actual phone for anything
-  touch/gesture-specific that can't be faithfully simulated headless.
+  done yet. A real (headless) Chromium can actually be driven on this box
+  now — see the `browser-testing-workaround` memory — so this can use real
+  browser testing with a mobile viewport/user-agent set via Chrome's own
+  CLI flags, not just jsdom. Still worth a manual spot-check by Fernando on
+  an actual phone for anything genuinely touch/gesture-specific.
 
 ## Step 2 - Hardening & Cleanup
 
