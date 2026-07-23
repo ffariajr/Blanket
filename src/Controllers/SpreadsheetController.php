@@ -239,6 +239,177 @@ final class SpreadsheetController
         Response::json(['id' => $newId], 201);
     }
 
+    /**
+     * Bulk find-and-replace across cell text, for Fernando's own scripting/
+     * automation use (e.g. filling in "{{ChurchName}}"-style placeholders
+     * across a template spreadsheet before an event -- see TODO.md "Step 1
+     * - API surface"). Operates on each matching cell's raw `value` string
+     * verbatim, formula or not -- a plain text substitution, not a
+     * formula-aware one, matching how find-and-replace works by default in
+     * most spreadsheet tools.
+     *
+     * canEdit(), not canManage() -- this is bulk cell-CONTENT editing, the
+     * same permission class as saving a cell normally, not a tab-structure
+     * operation like create/rename/reorder/delete (owner-only, see
+     * TabController).
+     */
+    public function findReplace(Request $request): void
+    {
+        $user = Authenticator::resolve($request);
+        $spreadsheet = $this->findOrFail((int) $request->params['id']);
+
+        if (!$this->permissions->canEdit($spreadsheet, $user)) {
+            Response::error('Forbidden', 403);
+        }
+
+        $find = (string) $request->input('find', '');
+        if ($find === '') {
+            Response::error('find is required', 422);
+        }
+        $replace = (string) $request->input('replace', '');
+        $caseSensitive = (bool) $request->input('case_sensitive', false);
+
+        // tab_ids scopes to a subset; an id that isn't actually one of this
+        // spreadsheet's tabs is silently dropped here (listForSpreadsheet()
+        // already only returns tabs belonging to $spreadsheet) rather than
+        // erroring -- a caller can't touch another spreadsheet's tab just by
+        // guessing its id.
+        $allTabs = $this->tabs->listForSpreadsheet($spreadsheet['id']);
+        $tabIdsInput = $request->input('tab_ids');
+        if (is_array($tabIdsInput) && $tabIdsInput !== []) {
+            $wanted = array_map('intval', $tabIdsInput);
+            $tabsInScope = array_values(array_filter($allTabs, fn (array $t) => in_array($t['id'], $wanted, true)));
+        } else {
+            $tabsInScope = $allTabs;
+        }
+
+        // cells scopes to specific A1 refs/ranges within each in-scope tab;
+        // omitted/empty means every cell. null (not []) is the "no scope"
+        // sentinel so an explicitly-empty array doesn't get confused with
+        // "match everything".
+        $cellsInput = $request->input('cells');
+        $scopeBounds = null;
+        if (is_array($cellsInput) && $cellsInput !== []) {
+            $scopeBounds = [];
+            foreach ($cellsInput as $entry) {
+                $parsed = $this->parseScopeEntry((string) $entry);
+                if ($parsed !== null) {
+                    $scopeBounds[] = $parsed;
+                }
+            }
+        }
+
+        $editorName = $request->input('editor_name');
+        $tabsChanged = [];
+        $cellsChanged = 0;
+
+        foreach ($tabsInScope as $tab) {
+            $current = $this->history->current($tab['id']);
+            $data = $current['data'] ?? null;
+            $cellsObj = (is_object($data) && isset($data->cells)) ? $data->cells : new \stdClass();
+            $cellsArr = (array) $cellsObj;
+
+            $tabChanged = false;
+            foreach ($cellsArr as $ref => $cell) {
+                if (!is_object($cell) || !isset($cell->value) || !is_string($cell->value)) {
+                    continue;
+                }
+                if ($scopeBounds !== null && !$this->refInScope((string) $ref, $scopeBounds)) {
+                    continue;
+                }
+                $newValue = $caseSensitive
+                    ? str_replace($find, $replace, $cell->value)
+                    : str_ireplace($find, $replace, $cell->value);
+                if ($newValue !== $cell->value) {
+                    $cell->value = $newValue;
+                    $cellsArr[$ref] = $cell;
+                    $tabChanged = true;
+                    $cellsChanged++;
+                }
+            }
+
+            // Append-only history: only write a new row for a tab that
+            // actually changed, never a no-op entry just because it was in
+            // scope -- a needless row is permanent clutter, not undoable.
+            if ($tabChanged) {
+                $newData = (array) $data;
+                $newData['cells'] = (object) $cellsArr;
+                $this->history->save(
+                    $tab['id'],
+                    $newData,
+                    $user,
+                    $request->clientIp(),
+                    is_string($editorName) ? $editorName : null,
+                );
+                $tabsChanged[] = $tab['id'];
+            }
+        }
+
+        Response::json(['tabs_changed' => $tabsChanged, 'cells_changed' => $cellsChanged]);
+    }
+
+    /**
+     * Parses one `cells` scope entry into a 0-based, inclusive
+     * [minCol, maxCol, minRow, maxRow] bound -- PHP_INT_MAX standing in for
+     * "unbounded in that direction" (a whole row/column). Mirrors
+     * assets/js/formulas.js's A1 grammar (multi-letter columns, A..Z then
+     * AA..AZ...) but is its own small implementation, same as
+     * CsvController's parseA1Ref/colIndexToLetter -- not worth sharing
+     * across controllers for four lines of arithmetic.
+     */
+    private function parseScopeEntry(string $entry): ?array
+    {
+        $entry = strtoupper(trim($entry));
+
+        if (preg_match('/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/', $entry, $m)) {
+            $c1 = $this->colLetterToIndex($m[1]);
+            $c2 = $this->colLetterToIndex($m[3]);
+            $r1 = ((int) $m[2]) - 1;
+            $r2 = ((int) $m[4]) - 1;
+            return [min($c1, $c2), max($c1, $c2), min($r1, $r2), max($r1, $r2)];
+        }
+        if (preg_match('/^([A-Z]+):([A-Z]+)$/', $entry, $m)) {
+            $c1 = $this->colLetterToIndex($m[1]);
+            $c2 = $this->colLetterToIndex($m[2]);
+            return [min($c1, $c2), max($c1, $c2), 0, PHP_INT_MAX];
+        }
+        if (preg_match('/^(\d+):(\d+)$/', $entry, $m)) {
+            $r1 = ((int) $m[1]) - 1;
+            $r2 = ((int) $m[2]) - 1;
+            return [0, PHP_INT_MAX, min($r1, $r2), max($r1, $r2)];
+        }
+        if (preg_match('/^([A-Z]+)(\d+)$/', $entry, $m)) {
+            $c = $this->colLetterToIndex($m[1]);
+            $r = ((int) $m[2]) - 1;
+            return [$c, $c, $r, $r];
+        }
+        return null;
+    }
+
+    private function refInScope(string $ref, array $scopeBounds): bool
+    {
+        if (!preg_match('/^([A-Z]+)(\d+)$/', strtoupper($ref), $m)) {
+            return false;
+        }
+        $col = $this->colLetterToIndex($m[1]);
+        $row = ((int) $m[2]) - 1;
+        foreach ($scopeBounds as [$minCol, $maxCol, $minRow, $maxRow]) {
+            if ($col >= $minCol && $col <= $maxCol && $row >= $minRow && $row <= $maxRow) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function colLetterToIndex(string $letters): int
+    {
+        $col = 0;
+        foreach (str_split($letters) as $ch) {
+            $col = $col * 26 + (ord($ch) - 64);
+        }
+        return $col - 1;
+    }
+
     private function findOrFail(int $id): array
     {
         $spreadsheet = $this->spreadsheets->find($id);
