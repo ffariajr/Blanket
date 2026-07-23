@@ -1325,14 +1325,35 @@ export class Grid {
     }
   }
 
-  /** Current selection's format, read from the anchor cell -- lets the toolbar show/toggle current state instead of blindly forcing bold/italic/etc. on. */
+  /**
+   * Current selection's format, merged across every visible cell in the
+   * range (not just the anchor) -- lets the toolbar show/toggle current
+   * state instead of blindly forcing bold/italic/etc. on. For each format
+   * key present on any cell, returns the shared value if every cell in the
+   * selection agrees (including cells with no explicit value for that key,
+   * which count as `undefined`), or FORMAT_MIXED if they don't.
+   */
   getSelectionFormat() {
     if (!this.anchor) return {};
-    return (this.cells[this.anchor] && this.cells[this.anchor].format) || {};
+    const refs = this._visibleRangeRefs(this.anchor, this.selected);
+    if (!refs.length) return {};
+    const formats = refs.map((ref) => (this.cells[ref] && this.cells[ref].format) || {});
+    const keys = new Set();
+    formats.forEach((f) => Object.keys(f).forEach((k) => keys.add(k)));
+    const result = {};
+    for (const key of keys) {
+      const values = formats.map((f) => f[key]);
+      result[key] = values.every((v) => v === values[0]) ? values[0] : FORMAT_MIXED;
+    }
+    return result;
   }
 
+  // Standard toggle convention: only "on" (true, non-mixed) for every cell
+  // in the selection turns it off; anything else (some/all off, or a mixed
+  // selection) turns it on for all -- avoids silently un-toggling cells
+  // that never had the anchor's state to begin with.
   toggleFormatOnSelection(key) {
-    const current = !!this.getSelectionFormat()[key];
+    const current = this.getSelectionFormat()[key] === true;
     this.applyFormatToSelection({ [key]: !current });
   }
 
@@ -1608,6 +1629,12 @@ export class Grid {
     return patch;
   }
 }
+
+// Sentinel returned by Grid.getSelectionFormat() for a format key whose
+// value disagrees across the selected cells (as opposed to a key simply
+// absent everywhere, which is omitted) -- distinct from `undefined` so
+// callers can tell "mixed" apart from "no cell in the selection sets this".
+export const FORMAT_MIXED = '__mixed__';
 
 // Deliberately small, fixed preset lists rather than free-text CSS values
 // (per the "keep it simple" scope for this feature) -- font-family/size

@@ -1,5 +1,5 @@
 import { api, ApiError, setToken, getDisplayName, setDisplayName, isSessionValid, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
-import { Grid, FONT_FAMILIES, FONT_SIZES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE } from './grid.js?v=__DEPLOY_VERSION__';
+import { Grid, FONT_FAMILIES, FONT_SIZES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, FORMAT_MIXED } from './grid.js?v=__DEPLOY_VERSION__';
 import { TabSocket } from './ws.js?v=__DEPLOY_VERSION__';
 
 const root = document.getElementById('app');
@@ -526,12 +526,18 @@ async function renderSheet(spreadsheetId, tabId) {
   // built, by which point those consts already exist.
   function updateEffectiveFontOptions() {
     const fmt = grid.getSelectionFormat();
-    const family = fmt.fontFamily || DEFAULT_FONT_FAMILY;
+    // FORMAT_MIXED means the selection spans cells that disagree on this
+    // property -- neither a real font/size nor the default applies to the
+    // whole selection, so say so instead of picking one cell's value to
+    // represent all of them. The <select> itself falls back to the blank
+    // "Effective ..." option in that case too, since none of its concrete
+    // options correctly describes a mixed selection.
+    const family = fmt.fontFamily === FORMAT_MIXED ? 'mixed' : (fmt.fontFamily || DEFAULT_FONT_FAMILY);
     fontFamilyDefaultOption.textContent = `Effective font: ${family}`;
-    fontFamilySelect.value = fmt.fontFamily || '';
-    const size = fmt.fontSize || DEFAULT_FONT_SIZE;
-    fontSizeDefaultOption.textContent = `Effective size: ${size}pt`;
-    fontSizeSelect.value = fmt.fontSize ? String(fmt.fontSize) : '';
+    fontFamilySelect.value = fmt.fontFamily && fmt.fontFamily !== FORMAT_MIXED ? fmt.fontFamily : '';
+    const size = fmt.fontSize === FORMAT_MIXED ? 'mixed' : (fmt.fontSize || DEFAULT_FONT_SIZE);
+    fontSizeDefaultOption.textContent = `Effective size: ${size}${fmt.fontSize === FORMAT_MIXED ? '' : 'pt'}`;
+    fontSizeSelect.value = fmt.fontSize && fmt.fontSize !== FORMAT_MIXED ? String(fmt.fontSize) : '';
   }
   grid.onSelectionChange = (ref) => {
     formulaBar.onSelect(ref);
