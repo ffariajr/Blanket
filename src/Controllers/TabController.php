@@ -116,8 +116,14 @@ final class TabController
         if (!is_int($position) && !is_numeric($position)) {
             Response::error('Position is required', 422);
         }
+        // The tabs.position column is an unsigned int -- reject negative
+        // values here with a 422 rather than letting them fall through to a
+        // DB constraint violation (which surfaces as an opaque 500).
+        if ((int) $position < 0) {
+            Response::error('Position must not be negative', 422);
+        }
 
-        $this->tabs->reorder((int) $request->params['id'], (int) $position);
+        $this->tabs->reorder((int) $request->params['id'], $spreadsheet['id'], (int) $position);
         Response::json(['status' => 'ok']);
     }
 

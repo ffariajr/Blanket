@@ -1230,11 +1230,12 @@ function showRenameSpreadsheet(spreadsheet, onDone) {
   input.select();
 }
 
-// Full tab management: create, reorder (swaps the two tabs' `position`
-// values -- TabRepository.reorder() just sets the raw column, it doesn't
-// shift neighbors, so a single-sided update would leave two tabs sharing
-// a position), rename, delete. Reachable via the "Manage tabs" button next
-// to the spreadsheet title, not just the per-tab quick menu above.
+// Full tab management: create, reorder (a single move-to-position call --
+// TabRepository::reorder() shifts every tab between the old and new spot
+// server-side inside one transaction, so there's no separate "swap" call
+// needed and no window where two tabs can end up sharing a position),
+// rename, delete. Reachable via the "Manage tabs" button next to the
+// spreadsheet title, not just the per-tab quick menu above.
 async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
   const body = el('div', {});
   const error = el('p', { class: 'error hidden' });
@@ -1257,13 +1258,11 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             onclick: async () => {
               if (!prev) return;
               // Was a bare unhandled await with no try/catch, inconsistent
-              // with Delete below in this same function -- any failure
-              // (e.g. one of the two reorderTab calls in the swap
-              // succeeding and the other failing) surfaced as nothing
-              // happening, no error shown, reordering looking like it
-              // silently "doesn't work".
+              // with Delete below in this same function -- a failure
+              // surfaced as nothing happening, no error shown, reordering
+              // looking like it silently "doesn't work".
               try {
-                await Promise.all([api.reorderTab(t.id, prev.position), api.reorderTab(prev.id, t.position)]);
+                await api.reorderTab(t.id, prev.position);
                 await refresh();
                 onChanged();
               } catch {
@@ -1278,7 +1277,7 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             onclick: async () => {
               if (!next) return;
               try {
-                await Promise.all([api.reorderTab(t.id, next.position), api.reorderTab(next.id, t.position)]);
+                await api.reorderTab(t.id, next.position);
                 await refresh();
                 onChanged();
               } catch {

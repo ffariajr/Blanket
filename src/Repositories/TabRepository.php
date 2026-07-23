@@ -37,7 +37,7 @@ final class TabRepository
         $stmt = Db::connection()->prepare(
             'SELECT id, spreadsheet_id, name, position, created_at, deleted_at
              FROM tabs WHERE spreadsheet_id = :spreadsheet_id AND deleted_at IS NULL
-             ORDER BY position ASC'
+             ORDER BY position ASC, id ASC'
         );
         $stmt->execute(['spreadsheet_id' => $spreadsheetId]);
         return array_map($this->cast(...), $stmt->fetchAll());
@@ -68,10 +68,86 @@ final class TabRepository
         $stmt->execute(['name' => $name, 'id' => $id]);
     }
 
-    public function reorder(int $id, int $position): void
+    /**
+     * Moves tab $id to $targetPosition among its spreadsheet's active tabs,
+     * shifting every tab strictly between the old and new position by one
+     * to make room -- never just overwriting $id's position column, which
+     * is how two tabs used to end up sharing a position (see
+     * assets/js/app.js showManageTabs' old two-call swap and the comment
+     * that used to sit here). $targetPosition is clamped into
+     * [0, activeTabCount-1] so positions stay a contiguous 0..N-1
+     * sequence with no gaps or collisions; the caller (TabController) is
+     * still responsible for rejecting negative input outright with a 422
+     * rather than silently clamping it.
+     */
+    public function reorder(int $id, int $spreadsheetId, int $targetPosition): void
     {
-        $stmt = Db::connection()->prepare('UPDATE tabs SET position = :position WHERE id = :id');
-        $stmt->execute(['position' => $position, 'id' => $id]);
+        $pdo = Db::connection();
+        $pdo->beginTransaction();
+        try {
+            // Lock every active tab row in this spreadsheet for the
+            // transaction's duration so a concurrent reorder (or a create/
+            // delete that touches positions) can't interleave with the
+            // shift below and reintroduce a collision.
+            $lockStmt = $pdo->prepare(
+                'SELECT id, position FROM tabs
+                 WHERE spreadsheet_id = :spreadsheet_id AND deleted_at IS NULL
+                 ORDER BY position ASC, id ASC
+                 FOR UPDATE'
+            );
+            $lockStmt->execute(['spreadsheet_id' => $spreadsheetId]);
+            $rows = $lockStmt->fetchAll();
+
+            $activeCount = count($rows);
+            $oldPosition = null;
+            foreach ($rows as $row) {
+                if ((int) $row['id'] === $id) {
+                    $oldPosition = (int) $row['position'];
+                    break;
+                }
+            }
+            // Tab already gone or not part of this spreadsheet -- caller
+            // already resolved it via find(), so this shouldn't happen, but
+            // there's nothing sane to shift around if it does.
+            if ($oldPosition === null) {
+                $pdo->commit();
+                return;
+            }
+
+            $targetPosition = max(0, min($targetPosition, $activeCount - 1));
+            if ($targetPosition !== $oldPosition) {
+                if ($targetPosition > $oldPosition) {
+                    // Moving right: everything strictly after the old spot up
+                    // through the target slides left by one to close the gap.
+                    $shift = $pdo->prepare(
+                        'UPDATE tabs SET position = position - 1
+                         WHERE spreadsheet_id = :spreadsheet_id AND deleted_at IS NULL
+                           AND position > :old_position AND position <= :target_position'
+                    );
+                } else {
+                    // Moving left: everything from the target up through just
+                    // before the old spot slides right by one.
+                    $shift = $pdo->prepare(
+                        'UPDATE tabs SET position = position + 1
+                         WHERE spreadsheet_id = :spreadsheet_id AND deleted_at IS NULL
+                           AND position >= :target_position AND position < :old_position'
+                    );
+                }
+                $shift->execute([
+                    'spreadsheet_id' => $spreadsheetId,
+                    'old_position' => $oldPosition,
+                    'target_position' => $targetPosition,
+                ]);
+
+                $update = $pdo->prepare('UPDATE tabs SET position = :position WHERE id = :id');
+                $update->execute(['position' => $targetPosition, 'id' => $id]);
+            }
+
+            $pdo->commit();
+        } catch (\Throwable $e) {
+            $pdo->rollBack();
+            throw $e;
+        }
     }
 
     /**
