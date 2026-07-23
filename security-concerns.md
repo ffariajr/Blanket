@@ -46,14 +46,16 @@ files. If the process is ever compromised (a bug in a dependency, a
 malicious formula/cell payload triggering something unexpected), this
 caps what it can touch on disk.
 
-**2. `www-data` shared between the PHP app and the WS server.** Both
-services run as the same user, so a compromise of either has the same
-blast radius as compromising both -- a bug in one could read the other's
-secrets or interfere with its process. A dedicated, unprivileged service
-account for the WS server (instead of reusing `www-data`) would meaningfully
-narrow this, at the cost of a bit more setup (new user, group read access
-to `/var/www/church/blanket-ws/.mysql.env`/`.app.env`). Recommended, not
-mandatory -- flagging the tradeoff rather than deciding it.
+**2. `www-data` shared between the PHP app and the WS server -- considered,
+declined.** Both services run as the same user, so a compromise of either
+has the same blast radius as compromising both. A dedicated, unprivileged
+service account for the WS server would narrow this, but Fernando decided
+against it: `blanket-ws` is not a generic WebSocket server that some future
+unrelated site on this box might reuse -- its message protocol, `tab_id`
+routing, and auth model are all specific to Blanket, so a hypothetical
+second site would need its own WS service regardless, with its own
+dedicated account at that point. Not worth the setup cost for an isolation
+boundary that would only ever separate Blanket from itself.
 
 **2b. `blanket-ws` now lives inside `church/`'s docroot.** Originally
 deployed to `/var/www/blanket-ws`, a sibling of `church/` under

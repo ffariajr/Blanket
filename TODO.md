@@ -27,15 +27,16 @@ exploit — see security-concerns.md for full detail on each.
   (Confirm nothing — migrations included — relies on this same credential
   having DDL rights before running this.)
 
-- **Dedicated service account for `blanket-ws`**, instead of sharing
-  `www-data` with the PHP app (security-concerns.md #2). Recommended, not
-  mandatory — narrows blast radius if either service is compromised, at
-  the cost of new-user setup. Root-only.
+- ~~**Dedicated service account for `blanket-ws`**~~ — considered, declined
+  (security-concerns.md #2): `blanket-ws` is Blanket-specific by design
+  (protocol, `tab_id` routing, auth model), so it could never sensibly be
+  shared with a future unrelated site on this box anyway.
 
 - **JWTs land in Apache's access logs** as a URL query parameter on every
-  WS handshake (security-concerns.md #3). Worth a custom `LogFormat` that
-  redacts the query string for `/blanket/ws/`, or a deliberate decision
-  that log retention/access is fine as-is. Root-only.
+  WS handshake (security-concerns.md #3). Fix given to Fernando to apply as
+  root (a `LogFormat` swapping `%r` for `%m %U %H` on the church vhosts, so
+  future log lines never include the query string) — not yet confirmed
+  applied. Root-only.
 
 - ~~**No `Origin` header validation on the WS handshake**~~ — done, commit
   `303a435`, live since the `blanket-ws` restart.
