@@ -7,7 +7,28 @@ export const API_BASE = APP_BASE.replace(/\/$/, '') + '/api';
 
 const TOKEN_KEY = 'blanket_token';
 const NAME_KEY = 'blanket_display_name';
-const USERINFO_EMAIL_KEY = 'blanket_userinfo_email';
+
+// encodeURIComponent, not the raw field name -- a cookie NAME can't contain
+// ';'/'='/whitespace/control characters (RFC 6265), and infoType is
+// whatever string a cell's USERINFO(...) formula happens to contain, not a
+// fixed set this code controls. encodeURIComponent escapes exactly the
+// characters that would otherwise corrupt the cookie header (';', '=',
+// space, etc.); 'email' round-trips unchanged, so this doesn't break any
+// cookie a visitor already has from before this field became generic.
+function userInfoStorageKey(field) {
+  return `blanket_userinfo_${encodeURIComponent(field)}`;
+}
+
+// document.cookie has no per-name lookup API -- reading it with a RegExp
+// built from a dynamic name (as getDisplayName()/the old email-only getter
+// did with their fixed literal names) would need the name regex-escaped
+// too, since a field like "a.b" would otherwise match "aXb" as well. A
+// plain split-and-startsWith avoids that class of bug entirely.
+function readCookie(name) {
+  const prefix = name + '=';
+  const hit = (document.cookie ? document.cookie.split('; ') : []).find((p) => p.startsWith(prefix));
+  return hit ? decodeURIComponent(hit.slice(prefix.length)) : null;
+}
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -92,21 +113,19 @@ export function getCurrentUser() {
  * CELL_SCHEMA.md). "name" deliberately reuses getCurrentUser()/
  * getDisplayName() above -- the same identity already used for save
  * attribution and the first-visit name prompt, not a second source of
- * truth. "email" has no account-level source available client-side (the
- * JWT doesn't carry it, and there's no "fetch my own profile" endpoint),
- * so it's cookie-only -- that's also the field USERINFO's autoSaveToCookie
- * is actually for.
+ * truth. Every OTHER field (infoType is any string a formula author
+ * chooses, not a fixed set -- "email" is just the common example, not
+ * special-cased beyond it having existed here first) has no account-level
+ * source available client-side, so it's cookie-only, mirroring the same
+ * cookie+localStorage pattern "email" already used.
  */
 export function getUserInfoField(field) {
   if (field === 'name') {
     const user = getCurrentUser();
     return (user && user.displayName) || getDisplayName() || '';
   }
-  if (field === 'email') {
-    const m = document.cookie.match(/(?:^|; )blanket_userinfo_email=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : localStorage.getItem(USERINFO_EMAIL_KEY) || '';
-  }
-  return '';
+  const key = userInfoStorageKey(field);
+  return readCookie(key) || localStorage.getItem(key) || '';
 }
 
 /** Persists a USERINFO field value for reuse elsewhere. "name" writes through setDisplayName (same cookie, one identity). */
@@ -115,11 +134,10 @@ export function setUserInfoField(field, value) {
     setDisplayName(value);
     return;
   }
-  if (field === 'email') {
-    localStorage.setItem(USERINFO_EMAIL_KEY, value);
-    const oneYear = 365 * 24 * 60 * 60;
-    document.cookie = `blanket_userinfo_email=${encodeURIComponent(value)}; path=${APP_BASE}; max-age=${oneYear}; samesite=lax`;
-  }
+  const key = userInfoStorageKey(field);
+  localStorage.setItem(key, value);
+  const oneYear = 365 * 24 * 60 * 60;
+  document.cookie = `${key}=${encodeURIComponent(value)}; path=${APP_BASE}; max-age=${oneYear}; samesite=lax`;
 }
 
 class ApiError extends Error {
