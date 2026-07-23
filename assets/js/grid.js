@@ -557,6 +557,34 @@ export class Grid {
     return active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable;
   }
 
+  /**
+   * A dialog like the formula-help modal has no focusable input at all
+   * (nothing to type into), so _keyboardShouldDeferToOtherControl() above
+   * -- which only catches an INPUT/TEXTAREA/contentEditable actually
+   * stealing focus -- doesn't defer for it: document.activeElement stays
+   * whatever it was before the dialog opened. Without this, Delete/
+   * Backspace/Ctrl+C etc. fired at a modal (e.g. while selecting its text
+   * to copy) fall through to the grid underneath instead of being ignored.
+   */
+  _isModalOpen() {
+    return !!document.querySelector('.modal');
+  }
+
+  /**
+   * Real, non-collapsed browser text selection that isn't entirely inside
+   * the grid's own container -- table.grid has user-select:none (see
+   * app.css), so a genuine selection outside it can only mean the user is
+   * trying to copy something else on the page (a modal's text, most
+   * likely). _isModalOpen() above already covers that same case more
+   * simply, but this also protects a future non-modal selectable region,
+   * and is the more semantically precise check specifically for copy.
+   */
+  _hasExternalTextSelection() {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.anchorNode) return false;
+    return !this.container.contains(sel.anchorNode) || !this.container.contains(sel.focusNode);
+  }
+
   _renderAll() {
     for (let r = 0; r < this.rows; r++) {
       for (let c = 0; c < this.cols; c++) {
@@ -1126,6 +1154,10 @@ export class Grid {
   _onKeyDown(e) {
     if (this.editingInput || !this.selected) return;
     if (this._keyboardShouldDeferToOtherControl()) return;
+    // A modal (e.g. formula help) has no focusable input for the check
+    // above to catch, but the grid underneath still shouldn't react to
+    // Delete/Ctrl+C/etc. while one is open -- see _isModalOpen().
+    if (this._isModalOpen()) return;
 
     const moves = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     if (moves[e.key]) {
@@ -1141,7 +1173,12 @@ export class Grid {
       // The native 'copy' event (see _onCopy below) only fires when there's
       // an actual browser text/DOM selection, which clicking a cell never
       // creates here -- Ctrl+C otherwise silently does nothing. Handle it
-      // directly instead of relying on that event.
+      // directly instead of relying on that event. But if the user genuinely
+      // selected text elsewhere on the page (e.g. dragging over a dialog's
+      // text -- the modal check above already covers that case, this also
+      // covers any non-modal selectable text), let the browser's own copy
+      // proceed instead of overwriting the clipboard with cell data.
+      if (this._hasExternalTextSelection()) return;
       e.preventDefault();
       this._copySelectionToClipboard();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
@@ -1299,6 +1336,7 @@ export class Grid {
   // Ctrl+C/V is handled directly in _onKeyDown, which is what actually
   // works from a plain cell click.
   _onCopy(e) {
+    if (this._hasExternalTextSelection() || this._isModalOpen()) return;
     if (!this.selected || this.editingInput) return;
     if (this._keyboardShouldDeferToOtherControl()) return;
     e.clipboardData.setData('text/plain', this._selectionToTsv());
@@ -1306,6 +1344,7 @@ export class Grid {
   }
 
   _onPaste(e) {
+    if (this._isModalOpen()) return;
     if (this.readOnly || !this.selected || this.editingInput) return;
     if (this._keyboardShouldDeferToOtherControl()) return;
     const text = e.clipboardData.getData('text/plain');
