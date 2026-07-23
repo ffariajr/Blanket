@@ -934,7 +934,7 @@ const FORMULA_HELP = [
   { name: 'IF(condition, then, else)', desc: 'condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
   { name: 'CONCAT(...) / CONCATENATE(...)', desc: 'Joins any number of values into one piece of text.', example: '=CONCAT(A1, " ", B1)' },
   { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Not a computed function -- renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once. The only action today is USERINFO(...).', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name"), USERINFO(C2, "email"))' },
-  { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'An action for use inside ACTIONGROUP(...), not a standalone formula. Fills `cell` with the clicker’s saved value for infoType -- any name you choose (e.g. "phone", "address"), not limited to "name"/"email" (those are just the common examples). "name" is tied to the clicker’s account/display name; every other infoType is remembered per-visitor via a cookie. saveOnEdit=TRUE also saves whatever anyone later types into `cell` by hand, independent of the button.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE), USERINFO(B3, "phone", TRUE))' },
+  { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'Used inside ACTIONGROUP(...). Fills `cell` with the clicker’s saved value for infoType — any name you pick, e.g. "name", "email", "phone". saveOnEdit=TRUE also saves manual edits to `cell`.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE), USERINFO(B3, "phone", TRUE))' },
 ];
 
 function showFormulaHelp() {
