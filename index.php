@@ -27,6 +27,7 @@ $router->add('GET', '/api/health', function (Request $request): void {
 });
 
 $router->add('POST', '/api/login', fn (Request $r) => (new AuthController())->login($r));
+$router->add('POST', '/api/session/renew', fn (Request $r) => (new AuthController())->renew($r));
 
 $router->add('GET', '/api/spreadsheets', fn (Request $r) => (new SpreadsheetController())->index($r));
 $router->add('POST', '/api/spreadsheets', fn (Request $r) => (new SpreadsheetController())->create($r));

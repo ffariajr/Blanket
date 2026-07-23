@@ -149,6 +149,7 @@ async function request(method, path, body) {
 
 export const api = {
   login: (username, password) => request('POST', '/login', { username, password }),
+  renewSession: () => request('POST', '/session/renew'),
 
   listSpreadsheets: () => request('GET', '/spreadsheets'),
   createSpreadsheet: (title) => request('POST', '/spreadsheets', { title }),

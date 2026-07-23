@@ -11,7 +11,16 @@ use Firebase\JWT\Key;
 final class Jwt
 {
     private const ALGO = 'HS256';
-    private const TTL_SECONDS = 12 * 3600;
+
+    // Fernando: "I want the site to remember a logged-in user
+    // indefinitely" -- chose sliding renewal over one very-long-lived
+    // token, so this is deliberately long but not infinite: every
+    // login AND every AuthController::renew() call gets this same full
+    // window from that moment. A visitor who returns at least once every
+    // ~6 months never sees a login screen; a token that's genuinely
+    // abandoned (device lost, browser never reopened) still expires on
+    // its own eventually instead of being valid forever.
+    private const TTL_SECONDS = 180 * 24 * 3600;
 
     /** @param array{id:int,username:string,display_name:string,is_admin:bool} $user */
     public static function issue(array $user): string

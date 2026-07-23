@@ -126,6 +126,23 @@ monitoring -- worth keeping in mind that this app currently has no health
 check or alerting of any kind; a mistake like this one is otherwise
 silent until someone happens to look, or a user reports it.
 
+**8. Login tokens now live for 6 months, with sliding renewal, by
+deliberate choice.** Was 12h. Fernando: "I want the site to remember a
+logged-in user indefinitely" -- explicitly chose sliding renewal (a
+long-but-bounded TTL that quietly refreshes to a full new window on every
+app boot, via `POST /api/session/renew`, `src/Auth/Jwt.php`'s
+`TTL_SECONDS`) over the simpler alternative of just issuing one
+very-long-lived token. The tradeoff that decision buys back: a token that
+genuinely stops being used (lost device, browser never reopened) still
+expires on its own eventually rather than being valid forever, and if
+`JWT_SECRET` ever needs rotating for a real incident, that's still the
+one lever that invalidates everything at once -- same properties as
+before, just over a much longer practical window for someone who visits
+occasionally. `AuthController::renew()` re-fetches the account by
+username rather than trusting the token's own embedded claims, so a
+renewal correctly fails once an account is disabled or deleted, even
+though the token it's renewing from was still technically unexpired.
+
 ## Not a concern, but worth knowing
 
 - Firewalld only exposes 22/80/443 externally on this box -- there's no

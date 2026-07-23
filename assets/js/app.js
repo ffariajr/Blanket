@@ -1416,5 +1416,34 @@ function promptForNameIfNeeded() {
   }
 }
 
-promptForNameIfNeeded();
-route();
+// "Remember indefinitely" (Fernando) is sliding renewal, not one huge
+// token: every boot with a still-valid stored token silently trades it in
+// for a fresh one (POST /api/session/renew, fresh TTL_SECONDS from src/
+// Auth/Jwt.php) before anything else runs. A visitor who opens the app at
+// least once within that window never sees a login screen; one who
+// doesn't return in time still expires on schedule, same as before.
+// Renewing unconditionally on every boot rather than tracking "was my
+// token issued more than N days ago" -- this app isn't opened often
+// enough per visitor for the extra request to matter, and unconditional
+// is simpler than adding iat-tracking state for no real benefit here.
+// A 401 here means the token died (revoked/disabled/expired right at the
+// boundary) -- clear it, same as route()'s own 401 handling, so
+// promptForNameIfNeeded()/route() right after see the true state instead
+// of a token that LOOKED valid to isLoggedIn() a moment ago but isn't
+// anymore. Any OTHER failure (network hiccup, etc.) intentionally leaves
+// the existing token alone -- don't log someone out over a blip; route()'s
+// own requests will surface a real problem if there is one.
+async function boot() {
+  if (isLoggedIn()) {
+    try {
+      const res = await api.renewSession();
+      setToken(res.token);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) setToken(null);
+    }
+  }
+  promptForNameIfNeeded();
+  route();
+}
+
+boot();
