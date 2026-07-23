@@ -2,14 +2,25 @@
 
 Wire protocol (JSON text frames):
 
-Connect to: ws://host:port/ws/tabs/{tab_id}?token=<JWT>  (token optional)
+Connect to: ws://host:port/ws/tabs/{tab_id}
 
 Client -> server, first message MUST be "hello":
-  {"type": "hello", "name": "Display name"}
-    `name` is REQUIRED for anonymous connections (no/invalid token) --
-    it's what the frontend collects via its "what's your name?" prompt and
-    stores in a cookie, per the earlier design. Ignored for authenticated
-    connections (display name comes from the JWT).
+  {"type": "hello", "name": "Display name", "token": "<JWT>"}
+    `token` is optional -- omit it, or send an invalid/expired one, to
+    connect as the anonymous sentinel user (id 0). Deliberately carried
+    here instead of as a `?token=` query param on the connect URL (the
+    latter is how this worked before) -- Apache's access log records the
+    full request line for the initial HTTP upgrade, but never sees message
+    frames exchanged after the WS connection is established, so a token
+    that only ever travels in `hello` never ends up logged in plaintext
+    (security-concerns.md #3). This doesn't change *when* identity gets
+    resolved -- nothing privileged (session join, presence, document
+    access) has ever been possible before `hello` arrives regardless of
+    where the token travels, only *where the string sits on the wire*.
+    `name` is REQUIRED when there's no valid token -- it's what the
+    frontend collects via its "what's your name?" prompt and stores in a
+    cookie, per the earlier design. Ignored for authenticated connections
+    (display name comes from the JWT).
 
 Client -> server, after hello:
   {"type": "keystroke", "payload": <anything>}
@@ -62,7 +73,7 @@ import json
 import logging
 import signal
 import sys
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -90,18 +101,17 @@ ALLOWED_ORIGIN = "https://church.dogmanjr.net"
 
 
 def parse_request(path):
-    """Returns (tab_id:int|None, token:str|None)."""
+    """Returns tab_id:int|None. The token used to also come from here (a
+    ?token= query param) -- now carried in the hello message instead, see
+    this module's docstring, so there's nothing left to parse but tab_id."""
     parsed = urlparse(path)
     parts = [p for p in parsed.path.split("/") if p]
     if len(parts) != 3 or parts[0] != "ws" or parts[1] != "tabs":
-        return None, None
+        return None
     try:
-        tab_id = int(parts[2])
+        return int(parts[2])
     except ValueError:
-        return None, None
-    query = parse_qs(parsed.query)
-    token = query.get("token", [None])[0]
-    return tab_id, token
+        return None
 
 
 def client_ip(websocket):
@@ -111,7 +121,7 @@ def client_ip(websocket):
 
 async def handle_connection(websocket):
     request_path = websocket.request.path
-    tab_id, token = parse_request(request_path)
+    tab_id = parse_request(request_path)
     if tab_id is None:
         await websocket.close(code=1008, reason="Expected /ws/tabs/{tab_id}")
         return
@@ -127,7 +137,7 @@ async def handle_connection(websocket):
         await websocket.close(code=1008, reason="First message must be 'hello'")
         return
 
-    identity = auth.resolve_identity(token, hello.get("name"))
+    identity = auth.resolve_identity(hello.get("token"), hello.get("name"))
     if identity.is_anonymous and not hello.get("name"):
         await websocket.close(code=1008, reason="Anonymous connections must supply a name")
         return

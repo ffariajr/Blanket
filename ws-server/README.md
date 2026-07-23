@@ -28,18 +28,21 @@ externally-facing listener). Flushes all sessions with unsaved changes on
 
 ## Wire protocol
 
-Connect: `ws://host:port/ws/tabs/{tab_id}?token=<JWT>` (`token` optional --
-omit it, or send an invalid/expired one, to connect as the anonymous
-sentinel user, id 0).
+Connect: `ws://host:port/ws/tabs/{tab_id}`.
 
 First message from the client MUST be `hello`:
 ```json
-{"type": "hello", "name": "Display name"}
+{"type": "hello", "name": "Display name", "token": "<JWT>"}
 ```
-`name` is REQUIRED when connecting anonymously (the frontend's
-"what's your name?" prompt, stored client-side in a cookie per the
-product design). Ignored when authenticated -- the display name comes
-from the JWT's `display_name` claim instead.
+`token` is optional -- omit it, or send an invalid/expired one, to connect
+as the anonymous sentinel user, id 0. Carried here rather than as a
+`?token=` query param on the connect URL so it never ends up in Apache's
+access log (which only ever sees the initial HTTP upgrade request line,
+never message frames sent after). `name` is REQUIRED when connecting
+anonymously (the frontend's "what's your name?" prompt, stored
+client-side in a cookie per the product design). Ignored when
+authenticated -- the display name comes from the JWT's `display_name`
+claim instead.
 
 Client -> server, after `hello`:
 - `{"type": "keystroke", "payload": <anything>}` -- pure ephemeral relay

@@ -46,8 +46,7 @@ export class TabSocket {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const base = new URL('.', window.location.href);
     const path = (base.pathname.replace(/\/$/, '') || '') + `/ws/tabs/${this.tabId}`;
-    const token = getToken();
-    const url = `${proto}//${base.host}${path}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+    const url = `${proto}//${base.host}${path}`;
 
     try {
       this.ws = new WebSocket(url);
@@ -57,7 +56,14 @@ export class TabSocket {
     }
 
     this.ws.addEventListener('open', () => {
-      this._send({ type: 'hello', name: getDisplayName() || 'Anonymous' });
+      // Token travels in hello, not the connect URL -- Apache's access log
+      // sees the URL (the HTTP upgrade request line) but never message
+      // frames sent after, so this keeps it out of the log entirely
+      // (security-concerns.md #3) without changing when the server
+      // actually resolves identity (already deferred to hello, see
+      // ws-server/server.py's docstring).
+      const token = getToken();
+      this._send({ type: 'hello', name: getDisplayName() || 'Anonymous', ...(token ? { token } : {}) });
       this.connected = true;
       this.onStatus('connected');
     });

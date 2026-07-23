@@ -4,12 +4,18 @@ import sys
 
 import websockets
 
-URL = "ws://127.0.0.1:8765/ws/tabs/{tab_id}{token_qs}"
+URL = "ws://127.0.0.1:8765/ws/tabs/{tab_id}"
 
 
-def url(tab_id, token=None):
-    qs = f"?token={token}" if token else ""
-    return URL.format(tab_id=tab_id, token_qs=qs)
+def url(tab_id):
+    return URL.format(tab_id=tab_id)
+
+
+def hello(name="ignored", token=None):
+    payload = {"type": "hello", "name": name}
+    if token:
+        payload["token"] = token
+    return json.dumps(payload)
 
 
 async def recv_json(ws, timeout=3):
@@ -19,11 +25,11 @@ async def recv_json(ws, timeout=3):
 
 async def test_two_authenticated_clients_collab(owner_token, editor_token, tab_id):
     print("\n--- TEST 1: two authenticated clients, edit + keystroke relay, debounce persist ---")
-    async with websockets.connect(url(tab_id, owner_token)) as owner_ws, \
-               websockets.connect(url(tab_id, editor_token)) as editor_ws:
+    async with websockets.connect(url(tab_id)) as owner_ws, \
+               websockets.connect(url(tab_id)) as editor_ws:
 
-        await owner_ws.send(json.dumps({"type": "hello", "name": "ignored"}))
-        await editor_ws.send(json.dumps({"type": "hello", "name": "ignored"}))
+        await owner_ws.send(hello(token=owner_token))
+        await editor_ws.send(hello(token=editor_token))
 
         owner_state = await recv_json(owner_ws)
         editor_state = await recv_json(editor_ws)
@@ -54,8 +60,8 @@ async def test_two_authenticated_clients_collab(owner_token, editor_token, tab_i
 
 async def test_explicit_save(editor_token, tab_id):
     print("\n--- TEST 2: explicit save forces immediate persist ---")
-    async with websockets.connect(url(tab_id, editor_token)) as ws:
-        await ws.send(json.dumps({"type": "hello", "name": "ignored"}))
+    async with websockets.connect(url(tab_id)) as ws:
+        await ws.send(hello(token=editor_token))
         state = await recv_json(ws)
         print(f"state on connect: sequence={state['sequence']}")
 
@@ -68,8 +74,8 @@ async def test_explicit_save(editor_token, tab_id):
 
 async def test_max_wait_persist(owner_token, tab_id):
     print("\n--- TEST 3: continuous edits still force a persist at max-wait (~15s), not just debounce ---")
-    async with websockets.connect(url(tab_id, owner_token)) as ws:
-        await ws.send(json.dumps({"type": "hello", "name": "ignored"}))
+    async with websockets.connect(url(tab_id)) as ws:
+        await ws.send(hello(token=owner_token))
         await recv_json(ws)
 
         loop = asyncio.get_event_loop()
@@ -86,8 +92,8 @@ async def test_max_wait_persist(owner_token, tab_id):
 
 async def test_disconnect_flush(owner_token, tab_id):
     print("\n--- TEST 4: last-client-disconnect forces immediate flush ---")
-    ws = await websockets.connect(url(tab_id, owner_token))
-    await ws.send(json.dumps({"type": "hello", "name": "ignored"}))
+    ws = await websockets.connect(url(tab_id))
+    await ws.send(hello(token=owner_token))
     state = await recv_json(ws)
     seq_before = state["sequence"]
     await ws.send(json.dumps({"type": "new_edit", "payload": {"cells": {"E5": {"value": "bye"}}}}))

@@ -108,7 +108,9 @@ asyncio.run(main())
 A `{"type": "state", ...}` reply confirms the whole chain (Apache TLS ->
 wstunnel proxy -> blanket-ws systemd service -> DB) is working. Use a
 tab_id that actually exists and has anonymous view/edit access set, or
-include `?token=<JWT>` from a real login.
+add `'token': '<JWT>'` to the hello payload from a real login (the token
+travels in hello, not the connect URL -- see `ws-server/server.py`'s
+docstring).
 
 ## Notes
 

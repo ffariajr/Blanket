@@ -71,18 +71,24 @@ DB credentials become directly downloadable. Worth an occasional
 `curl -I https://church.dogmanjr.net/blanket-ws/ws-server/server.py`
 sanity check (expect 403) after any change near there.
 
-**3. JWTs land in Apache's access logs.** The WS handshake carries the
-token as a URL query parameter (`?token=<JWT>`) -- the only practical way
-to authenticate a browser WebSocket connection, since browsers don't let
-JS set custom headers on the WS upgrade request. Apache's `CustomLog`
-directives on this vhost log full request URIs by default, so every
-authenticated WS connection attempt writes a live bearer token (valid up
-to 12h, `src/Auth/Jwt.php`'s TTL) into `church-access.log` in plaintext.
-Log files are root-readable-only, so this isn't an open exposure, but
-it's a real defense-in-depth gap -- worth either a custom `LogFormat`
-that redacts the query string for `/blanket/ws/` specifically, or
-confirming log retention/access is something you're deliberately fine
-with.
+**3. JWTs land in Apache's access logs -- fixed at the root.** The WS
+handshake used to carry the token as a URL query parameter (`?token=<JWT>`),
+which Apache's `CustomLog` wrote into `church-access.log` in plaintext on
+every authenticated connection (a live bearer token, valid for 6 months
+under sliding renewal). A `LogFormat` redaction was considered and declined
+-- it would only stop *future* log lines, not scrub what's already on disk,
+and it's a mitigation, not a fix. Instead, the token now travels in the
+`hello` message (the client's first message after the WS connection opens)
+instead of the connect URL -- browsers don't let JS set custom headers on
+the WS upgrade request, which is why it was ever in the URL to begin with,
+but nothing requires it to be in the URL *specifically*; a message sent
+after the handshake completes works exactly as well for authentication and
+Apache's access log only ever sees the initial HTTP upgrade request line,
+never message frames exchanged after. This doesn't change when identity is
+resolved server-side (already deferred until `hello` arrives, since nothing
+privileged is possible before that regardless of where the token traveled)
+-- only where the string sits on the wire. See `ws-server/server.py`'s
+docstring and `assets/js/ws.js`'s `connect()`.
 
 ## Worth tightening, lower urgency
 
