@@ -1108,6 +1108,27 @@ export class Grid {
       } else if (e.key === 'Escape') {
         this.editingInput = null;
         this._renderCell(ref);
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        // Unlike Left/Right, a single-line input has no vertical cursor
+        // position to preserve -- always commit and move, no boundary check.
+        e.preventDefault();
+        this._commitEdit();
+        this._moveSelection(0, e.key === 'ArrowUp' ? -1 : 1);
+      } else if (e.key === 'ArrowLeft' && input.selectionStart === 0 && input.selectionEnd === 0) {
+        e.preventDefault();
+        this._commitEdit();
+        this._moveSelection(-1, 0);
+      } else if (e.key === 'ArrowRight' && input.selectionStart === input.value.length && input.selectionEnd === input.value.length) {
+        e.preventDefault();
+        this._commitEdit();
+        this._moveSelection(1, 0);
+      } else {
+        // Not a key we're intercepting -- most commonly Left/Right with the
+        // cursor mid-field, which should just move the cursor within the
+        // input normally. Returning here (skipping stopPropagation below)
+        // matters: preventDefault/stopPropagation on every keydown would
+        // otherwise block that native behavior too.
+        return;
       }
       e.stopPropagation();
     });
