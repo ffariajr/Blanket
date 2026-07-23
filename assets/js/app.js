@@ -944,7 +944,7 @@ const FORMULA_HELP = [
 // section from FORMULA_HELP so the help dialog can explain that distinction
 // instead of presenting actions as if they were ordinary functions.
 const ACTION_HELP = [
-  { name: 'USERINFO(cell, infoType[, saveOnEdit=false])', desc: 'Used inside ACTIONGROUP(...). Fills `cell` with the clicker’s saved value for infoType — any name you pick, e.g. "name", "email", "phone". saveOnEdit=TRUE also saves manual edits to `cell`.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", TRUE), USERINFO(B3, "phone", TRUE))' },
+  { name: 'USERINFO(cell, infoType[, saveOnEdit=true])', desc: 'Used inside ACTIONGROUP(...). Fills `cell` with the clicker’s saved value for infoType — any name you pick, e.g. "name", "email", "phone". saveOnEdit defaults to TRUE, so a manual edit to `cell` also saves back; pass FALSE to turn that off.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name"), USERINFO(B3, "phone"))' },
 ];
 
 function showFormulaHelp() {

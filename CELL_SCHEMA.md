@@ -99,25 +99,26 @@ not a value, and clicking it has side effects tied to the viewer's identity
   `formulas.js`, `ACTION_EXECUTORS` in `grid.js`), so a second action type
   can be added later without restructuring `ACTIONGROUP` itself.
 
-**`USERINFO(cell, infoType[, saveOnEdit=false])`** — not a standalone
+**`USERINFO(cell, infoType[, saveOnEdit=true])`** — not a standalone
 formula; only valid as an action argument inside `ACTIONGROUP(...)`.
 
 - `cell`: a plain cell reference (e.g. `B2`) — the *target* this action
   writes into, ordinarily a different cell than the one holding the
   `ACTIONGROUP` formula (e.g. the button lives in `A2`, and `USERINFO(B2,
   ...)`/`USERINFO(C2, ...)` target other cells in that same row).
-- `infoType`: `"name"` or `"email"` today, designed so a third field could
-  be added later without restructuring (see `getUserInfoField`/
-  `setUserInfoField` in `assets/js/api.js`) — unchanged from before this
-  redesign. `"name"` resolves from the JWT's `display_name` if logged in,
-  else the same `blanket_name` cookie used by the first-visit name prompt
-  elsewhere in this app (deliberately not a second name cookie). `"email"`
-  resolves from a dedicated `blanket_userinfo_email` cookie only — there's
-  no account-level email available client-side (the JWT doesn't carry it,
-  and there's no "fetch my own profile" endpoint), so this cookie *is* the
-  mechanism, not a fallback for one.
-- `saveOnEdit` (bool, 3rd arg, defaults `false`): if `TRUE`, `cell` is also
-  *watched* — see below.
+- `infoType`: any string a formula author chooses (see `getUserInfoField`/
+  `setUserInfoField` in `assets/js/api.js`) — not a fixed set. `"name"` is
+  the one special case, resolving from the JWT's `display_name` if logged
+  in, else the same `blanket_name` cookie used by the first-visit name
+  prompt elsewhere in this app (deliberately not a second name cookie).
+  Every other `infoType` (`"email"` is just the common example, not
+  special-cased beyond having existed here first) has no account-level
+  source available client-side, so it's cookie-backed only, keyed
+  dynamically by the field name itself (`encodeURIComponent`'d, since a
+  cookie name can't contain `;`/`=`/whitespace and `infoType` is arbitrary
+  formula-author input, not a fixed set this code controls).
+- `saveOnEdit` (bool, 3rd arg, defaults `true`): if `TRUE`, `cell` is also
+  *watched* — see below. Pass `FALSE` to opt out.
 
 **On click**, for each action in order: resolve `infoType` for the
 clicking viewer and write it into `cell` via `Grid.setCellValue()` — the

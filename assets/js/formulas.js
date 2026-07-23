@@ -30,7 +30,7 @@ export function isFormula(value) {
  * args don't match that action's shape.
  */
 const ACTION_ARG_PARSERS = {
-  // USERINFO(cell, infoType[, saveOnEdit=false]) -- see CELL_SCHEMA.md.
+  // USERINFO(cell, infoType[, saveOnEdit=true]) -- see CELL_SCHEMA.md.
   USERINFO(args) {
     if (args.length < 2 || args.length > 3) return null;
     if (args[0].kind !== 'ref') return null;
@@ -40,7 +40,7 @@ const ACTION_ARG_PARSERS = {
       type: 'USERINFO',
       cell: args[0].value,
       infoType: args[1].value,
-      saveOnEdit: args.length === 3 ? args[2].value : false,
+      saveOnEdit: args.length === 3 ? args[2].value : true,
     };
   },
 };
