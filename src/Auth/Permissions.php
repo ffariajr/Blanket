@@ -8,14 +8,19 @@ use Blanket\Repositories\AccessRepository;
 
 /**
  * access = owner OR admin OR a matching spreadsheet_access row. The
- * anonymous policy row (user_id=0) applies ONLY when the requester is
- * actually unauthenticated (no/invalid token) -- it is not a fallback
- * default for a logged-in user who simply lacks their own grant. This
- * matches the schema literally: it's "the anonymous access policy," not a
- * general default policy (see db/schemas.md, spreadsheet_access).
+ * anonymous policy row (user_id=0) is a *floor*, not a workaround: any
+ * non-owner/admin user -- logged in or not -- gets at least whatever the
+ * spreadsheet's anonymous policy allows, on top of their own explicit
+ * grant if they have one. A logged-in user with no explicit grant isn't
+ * denied down to nothing just because they authenticated; they don't need
+ * a personal row to match a baseline that's already public. This is the
+ * same precedence ws-server/access.py's resolve() uses -- the two are
+ * meant to be kept equivalent.
  */
 final class Permissions
 {
+    private const RANK = ['view' => 1, 'edit' => 2];
+
     public function __construct(private readonly AccessRepository $access = new AccessRepository())
     {
     }
@@ -30,8 +35,10 @@ final class Permissions
             return 'owner';
         }
 
-        $row = $this->access->get($spreadsheet['id'], $user->isAnonymous() ? 0 : $user->id);
-        return $row['access_level'] ?? null;
+        $explicit = $user->isAnonymous() ? null : $this->access->get($spreadsheet['id'], $user->id)['access_level'] ?? null;
+        $anonymous = $this->access->get($spreadsheet['id'], 0)['access_level'] ?? null;
+
+        return (self::RANK[$explicit] ?? 0) >= (self::RANK[$anonymous] ?? 0) ? $explicit : $anonymous;
     }
 
     /** @param array{id:int,owner_id:int} $spreadsheet */

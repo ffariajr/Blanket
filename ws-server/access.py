@@ -1,13 +1,16 @@
 """Resolves a user's effective access level for a tab.
 
-Not specified anywhere before now, so documenting the precedence rule
-chosen here: owner or admin always get 'edit'. Otherwise the effective
-level is the higher of (a) an explicit spreadsheet_access row for this
-user_id and (b) the spreadsheet's anonymous policy row (user_id=0) -- i.e.
-a logged-in user with no explicit grant still gets at least whatever the
+This is the intentional, canonical precedence rule (not a workaround):
+owner or admin always get 'edit'. Otherwise the effective level is the
+higher of (a) an explicit spreadsheet_access row for this user_id and (b)
+the spreadsheet's anonymous policy row (user_id=0) -- i.e. a logged-in
+user with no explicit grant still gets at least whatever the
 public/anonymous policy allows, they don't need their own row to match a
 baseline that's already public. No row at all (neither explicit nor
 anonymous) on either side means no access.
+
+src/Auth/Permissions.php::levelFor() mirrors this exact precedence on the
+REST side -- the two are meant to be kept equivalent.
 """
 
 import db
