@@ -1,4 +1,4 @@
-import { api, ApiError, setToken, getDisplayName, setDisplayName, isSessionValid, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
+import { api, ApiError, setToken, getDisplayName, setDisplayName, getCurrentUser, isSessionValid, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
 import { Grid, FONT_FAMILIES, FONT_SIZES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, FORMAT_MIXED } from './grid.js?v=__DEPLOY_VERSION__';
 import { TabSocket } from './ws.js?v=__DEPLOY_VERSION__';
 
@@ -508,6 +508,7 @@ async function renderSheet(spreadsheetId, tabId) {
       socket.queueEdit(patch);
       localSaveFallbackTimer();
     },
+    onNeedUserInfo: showUserInfoPrompt,
   });
 
   // Formula bar: classic spreadsheet UX -- shows/edits the RAW value
@@ -987,6 +988,53 @@ function showFormulaHelp() {
   document.body.appendChild(dialog);
 }
 
+/**
+ * Grid's onNeedUserInfo hook (see grid.js's _runActionGroup) -- one
+ * consolidated dialog for every USERINFO field an ACTIONGROUP click needs,
+ * instead of a native window.prompt() per missing field (the old behavior
+ * mislabeled everything but "email" as "Your name", since it predated
+ * USERINFO accepting arbitrary infoType values). Shows ALL fields
+ * referenced by the group, not just the missing ones -- an already-known
+ * field is pre-filled and still editable, per Fernando: "show all userinfo
+ * values, with the ones that have cookies already pre-filled in but
+ * editable." Every field is optional (blank = that action gets skipped,
+ * same as the old "user cancelled" outcome) -- unlike the required
+ * first-visit name prompt, this one closes on a backdrop click, since
+ * dismissing it is equivalent to leaving every field blank.
+ */
+function showUserInfoPrompt(fields) {
+  return new Promise((resolve) => {
+    const inputs = {};
+    const dialog = el('div', {
+      class: 'modal',
+      onclick: (e) => { if (e.target === dialog) { dialog.remove(); resolve(null); } },
+    }, [
+      el('div', { class: 'modal-content' }, [
+        el('h2', {}, 'A few details'),
+        el('form', {
+          class: 'userinfo-prompt-form',
+          onsubmit: (e) => {
+            e.preventDefault();
+            const values = {};
+            for (const f of fields) values[f.infoType] = inputs[f.infoType].value;
+            dialog.remove();
+            resolve(values);
+          },
+        }, [
+          ...fields.map((f) => el('label', { class: 'userinfo-prompt-field' }, [
+            f.infoType,
+            (inputs[f.infoType] = el('input', { type: 'text', value: f.value || '' })),
+          ])),
+          el('button', { class: 'btn', type: 'submit' }, 'Save'),
+        ]),
+      ]),
+    ]);
+    document.body.appendChild(dialog);
+    const firstInput = inputs[fields[0].infoType];
+    if (firstInput) firstInput.focus();
+  });
+}
+
 async function showShare(spreadsheetId, shareUrl) {
   const body = el('div', { class: 'share-body' });
   const error = el('p', { class: 'error hidden' });
@@ -1452,19 +1500,34 @@ function renderError(e) {
 
 // Ask an anonymous visitor for a display name once, on first visit to the
 // app generally -- not just when they land inside a specific sheet (the
-// old behavior). Only fires if they're not logged in and don't already
-// have a display-name cookie; never fires again once one's set. Runs
-// before the very first route() so it's the first thing a fresh
-// anonymous visitor sees, on both mobile and desktop.
+// old behavior). Never fires again once the name cookie is set, one way
+// or another. Runs before the very first route() so it's the first thing
+// a fresh anonymous visitor sees, on both mobile and desktop.
+//
+// A logged-in user is NEVER shown this dialog -- but unlike before, that's
+// not because their account displayName silently substitutes for the
+// cookie everywhere it's read (see getUserInfoField('name') in api.js,
+// which no longer does that). It's a one-time seed: a fresh login with no
+// cookie yet gets one silently written from the account, right here, and
+// is free to diverge from the account from that point on (Fernando: "a
+// logged in user does not have to be forced to use their display name
+// from their account ... they can change their name cookie freely.
+// account name remains what it was").
 //
 // Returns a Promise so boot() can await it -- unlike every other dialog in
 // this app, this one deliberately has NO backdrop-click-to-close and NO
 // Close/Cancel button: a blank submit re-shows a validation message instead
 // of dismissing, since there's no sensible "anonymous with no name at all"
 // state for the rest of the app to fall back to (Fernando: "do not allow
-// closing with an empty value").
+// closing with an empty value"). Only reachable at all when NOT logged in
+// (see above), so isLoggedIn() doesn't need checking again inside it.
 function promptForNameIfNeeded() {
-  if (isLoggedIn() || getDisplayName()) return Promise.resolve();
+  if (getDisplayName()) return Promise.resolve();
+  if (isLoggedIn()) {
+    const user = getCurrentUser();
+    if (user && user.displayName) setDisplayName(user.displayName);
+    return Promise.resolve();
+  }
   return new Promise((resolve) => {
     const input = el('input', { type: 'text', placeholder: 'Your name' });
     const error = el('p', { class: 'error hidden' });

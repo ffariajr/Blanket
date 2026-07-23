@@ -284,6 +284,13 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 .inline-form { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); }
 .inline-form input { flex: 1; }
 
+/* Grid's onNeedUserInfo dialog -- one labeled input per USERINFO field,
+   stacked (unlike .inline-form's single row, this can hold any number of
+   fields depending on what an ACTIONGROUP references). */
+.userinfo-prompt-form { display: flex; flex-direction: column; gap: var(--space-3); }
+.userinfo-prompt-field { display: flex; flex-direction: column; gap: var(--space-1); font-weight: 600; }
+.userinfo-prompt-field input { font-weight: normal; }
+
 .sheet-list, .tab-list, .history-list, .access-list { list-style: none; padding: 0; margin: 0; }
 .sheet-list li, .tab-list li {
   padding: var(--space-3);

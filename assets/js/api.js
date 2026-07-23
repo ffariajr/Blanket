@@ -110,20 +110,23 @@ export function getCurrentUser() {
 
 /**
  * Resolves the viewer's own value for a USERINFO() field (see
- * CELL_SCHEMA.md). "name" deliberately reuses getCurrentUser()/
- * getDisplayName() above -- the same identity already used for save
- * attribution and the first-visit name prompt, not a second source of
- * truth. Every OTHER field (infoType is any string a formula author
- * chooses, not a fixed set -- "email" is just the common example, not
- * special-cased beyond it having existed here first) has no account-level
- * source available client-side, so it's cookie-only, mirroring the same
- * cookie+localStorage pattern "email" already used.
+ * CELL_SCHEMA.md). "name" is just getDisplayName() -- the same cookie used
+ * for save attribution and the first-visit name prompt, not a second
+ * source of truth -- and NOT the logged-in account's displayName: a
+ * logged-in user is free to edit this independently of their permanent
+ * account identity (Fernando: "a logged in user does not have to be
+ * forced to use their display name from their account"). boot()/
+ * promptForNameIfNeeded() in app.js seed this cookie from the account
+ * once, on a fresh login with no cookie yet -- after that one-time seed,
+ * this never looks at the account again. Every OTHER field (infoType is
+ * any string a formula author chooses, not a fixed set -- "email" is just
+ * the common example, not special-cased beyond it having existed here
+ * first) has no account-level source available client-side regardless,
+ * so it's cookie-only, mirroring the same cookie+localStorage pattern
+ * "email" already used.
  */
 export function getUserInfoField(field) {
-  if (field === 'name') {
-    const user = getCurrentUser();
-    return (user && user.displayName) || getDisplayName() || '';
-  }
+  if (field === 'name') return getDisplayName();
   const key = userInfoStorageKey(field);
   return readCookie(key) || localStorage.getItem(key) || '';
 }

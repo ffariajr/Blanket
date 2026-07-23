@@ -16,21 +16,36 @@ import { getUserInfoField, setUserInfoField } from './api.js?v=__DEPLOY_VERSION_
  * there, execution lives here since it needs Grid's cookie/DOM access).
  * A new action type is added by adding one entry here and one there,
  * without touching _runActionGroup. Each executor resolves the action's
- * value for the current viewer, returning null/undefined if unresolvable
- * (e.g. the viewer cancelled an inline prompt) -- _runActionGroup skips
- * writing that action's target cell in that case, but still runs the rest.
+ * value for the current viewer given `resolved` (a plain infoType->value
+ * map _runActionGroup already collected up front, see there), returning
+ * null/undefined if unresolvable -- _runActionGroup skips writing that
+ * action's target cell in that case, but still runs the rest. Executors
+ * don't prompt for missing values themselves -- that's a UI concern
+ * (app.js's onNeedUserInfo), not this registry's; keeps this file's usual
+ * data-layer/UI-layer split (see the contextmenu/mergeSelection comments
+ * elsewhere in this file) intact for actions too.
  */
 const ACTION_EXECUTORS = {
+  USERINFO(action, resolved) {
+    return (resolved && resolved[action.infoType]) || getUserInfoField(action.infoType) || null;
+  },
+};
+
+/**
+ * Parallel to ACTION_EXECUTORS: for an action type with a user-resolvable
+ * field, returns {key, value} (value = its current cookie/account value,
+ * possibly '') so _runActionGroup can collect every field referenced
+ * anywhere in the group -- across every action, not just the ones missing
+ * a value -- and decide as a whole whether to show app.js's consolidated
+ * onNeedUserInfo dialog (only if at least one is missing) with all of them
+ * listed (so an already-known field is shown pre-filled/editable, not
+ * hidden). A future action type with its own resolvable field plugs in
+ * here the same way, without _runActionGroup itself knowing anything
+ * about "infoType" or USERINFO specifically.
+ */
+const ACTION_NEEDS = {
   USERINFO(action) {
-    let value = getUserInfoField(action.infoType);
-    if (!value) {
-      const label = action.infoType === 'email' ? 'Your email address' : 'Your name';
-      const entered = window.prompt(label);
-      if (!entered || !entered.trim()) return null;
-      value = entered.trim();
-      setUserInfoField(action.infoType, value);
-    }
-    return value;
+    return { key: action.infoType, value: getUserInfoField(action.infoType) };
   },
 };
 
@@ -76,8 +91,17 @@ export class Grid {
    *   ws-server/merge_patch.py expects, and the ONLY place that shape is
    *   assembled, so callers (app.js) never need to know about it.
    * @param {boolean} opts.readOnly
+   * @param {(fields: Array<{infoType: string, value: string}>) =>
+   *   Promise<Record<string,string>|null>} [opts.onNeedUserInfo] called by
+   *   _runActionGroup when an ACTIONGROUP click needs one or more
+   *   USERINFO fields it doesn't already have -- app.js's job to render an
+   *   actual dialog (this file has no dialog machinery of its own); resolve
+   *   with an infoType->value map (blank/omitted entries are treated as
+   *   skipped) or null to skip everything. Defaults to always skipping, so
+   *   a Grid built without this option (e.g. a future test harness) still
+   *   works, just without ever resolving a missing field.
    */
-  constructor(container, { document: doc, onChange, readOnly }) {
+  constructor(container, { document: doc, onChange, readOnly, onNeedUserInfo }) {
     this.container = container;
     doc = doc || {};
     this.cells = doc.cells || {};
@@ -86,6 +110,7 @@ export class Grid {
     this.cols = doc.cols || LEGACY_COLS;
     this.rows = doc.rows || LEGACY_ROWS;
     this.onChange = onChange || (() => {});
+    this.onNeedUserInfo = onNeedUserInfo || (() => Promise.resolve(null));
     this.readOnly = !!readOnly;
     this.selected = null; // ref string
     this.anchor = null; // for range selection
@@ -678,14 +703,22 @@ export class Grid {
   }
 
   /**
-   * Runs every action in an ACTIONGROUP click, in order. Each action's
-   * target cell is written via setCellValue() -- the same commit path as
-   * typing/the formula bar/paste -- so a saveOnEdit watch on that same
-   * target (see _buildActionGroupWatches) also gets a chance to fire (a
-   * no-op in practice: the value being written back to cookie/DB is the
-   * same one that was just read from there). An unresolvable action (e.g.
-   * an anonymous viewer cancelled the inline prompt -- see
-   * ACTION_EXECUTORS.USERINFO) is skipped without aborting the rest.
+   * Runs every action in an ACTIONGROUP click, in order. First collects
+   * every user-resolvable field referenced anywhere in the group (via
+   * ACTION_NEEDS, deduped by key) and, only if at least one is missing a
+   * value, awaits ONE consolidated prompt (this.onNeedUserInfo -- app.js's
+   * job to actually render, this file has no dialog machinery of its own,
+   * same split as _onContextMenu/mergeSelection elsewhere here) listing
+   * ALL of them (not just the missing ones, so an already-known field is
+   * still shown, pre-filled and editable) before running anything -- one
+   * dialog per click, not one native prompt per missing field. Each
+   * action's target cell is then written via setCellValue() -- the same
+   * commit path as typing/the formula bar/paste -- so a saveOnEdit watch
+   * on that same target (see _buildActionGroupWatches) also gets a chance
+   * to fire (a no-op in practice: the value being written back to
+   * cookie/DB is the same one just read from there). An action left
+   * blank in the dialog (or the whole dialog dismissed) is skipped without
+   * aborting the rest.
    *
    * hideOnClick's disabled state is a separate, explicit patch to the
    * ACTIONGROUP cell itself (`actionState`, not `value` -- the formula
@@ -693,12 +726,29 @@ export class Grid {
    * button, just disabled) -- persisted in the shared document so every
    * connected viewer sees it, not just the clicker.
    */
-  _runActionGroup(ref, actions, hideOnClick) {
+  async _runActionGroup(ref, actions, hideOnClick) {
     if (this.readOnly) return;
+
+    const fields = new Map();
+    for (const action of actions) {
+      const need = ACTION_NEEDS[action.type] && ACTION_NEEDS[action.type](action);
+      if (need && !fields.has(need.key)) fields.set(need.key, need.value);
+    }
+    const resolved = Object.fromEntries(fields);
+    if ([...fields.values()].some((v) => !v)) {
+      const entered = await this.onNeedUserInfo([...fields.entries()].map(([infoType, value]) => ({ infoType, value })));
+      if (entered) {
+        for (const [key, value] of Object.entries(entered)) {
+          const trimmed = (value || '').trim();
+          if (trimmed) { setUserInfoField(key, trimmed); resolved[key] = trimmed; }
+        }
+      }
+    }
+
     for (const action of actions) {
       const executor = ACTION_EXECUTORS[action.type];
       if (!executor) continue;
-      const result = executor(action);
+      const result = executor(action, resolved);
       if (result === null || result === undefined) continue;
       if (this._isCovered(action.cell)) continue;
       this.setCellValue(action.cell, result);

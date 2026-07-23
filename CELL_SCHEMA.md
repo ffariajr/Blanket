@@ -108,29 +108,40 @@ formula; only valid as an action argument inside `ACTIONGROUP(...)`.
   ...)`/`USERINFO(C2, ...)` target other cells in that same row).
 - `infoType`: any string a formula author chooses (see `getUserInfoField`/
   `setUserInfoField` in `assets/js/api.js`) — not a fixed set. `"name"` is
-  the one special case, resolving from the JWT's `display_name` if logged
-  in, else the same `blanket_name` cookie used by the first-visit name
-  prompt elsewhere in this app (deliberately not a second name cookie).
-  Every other `infoType` (`"email"` is just the common example, not
-  special-cased beyond having existed here first) has no account-level
-  source available client-side, so it's cookie-backed only, keyed
-  dynamically by the field name itself (`encodeURIComponent`'d, since a
-  cookie name can't contain `;`/`=`/whitespace and `infoType` is arbitrary
-  formula-author input, not a fixed set this code controls).
+  just `getDisplayName()`'s cookie, same as everywhere else it's used
+  (save attribution, the first-visit name prompt) — NOT the logged-in
+  account's `display_name`; a logged-in user is free to edit it
+  independently of their permanent account identity. The one thing an
+  account does is seed this cookie once, silently, the first time someone
+  logs in with no cookie yet (`promptForNameIfNeeded()` in `app.js`) — after
+  that one-time seed it's fully independent, and the account's real
+  `display_name` is never read again for this purpose. Every other
+  `infoType` (`"email"` is just the common example, not special-cased
+  beyond having existed here first) has no account-level source available
+  client-side regardless, so it's cookie-backed only, keyed dynamically by
+  the field name itself (`encodeURIComponent`'d, since a cookie name can't
+  contain `;`/`=`/whitespace and `infoType` is arbitrary formula-author
+  input, not a fixed set this code controls).
 - `saveOnEdit` (bool, 3rd arg, defaults `true`): if `TRUE`, `cell` is also
   *watched* — see below. Pass `FALSE` to opt out.
 
-**On click**, for each action in order: resolve `infoType` for the
-clicking viewer and write it into `cell` via `Grid.setCellValue()` — the
-same commit path as typing/the formula bar/paste, not a parallel one. If
-unresolvable (e.g. an anonymous viewer, `infoType="email"`, no cookie yet),
-prompts inline for it — consistent with the existing first-visit name
-prompt pattern elsewhere in this app — stores what they enter for reuse,
-and then fills `cell` with it; if they cancel, that one action is skipped
-(the rest of the group's actions, and `hideOnClick`, still proceed). If
-`hideOnClick` is `TRUE`, the `ACTIONGROUP` cell itself then gets
-`actionState: {clicked: true}` in a separate patch (the formula stays
-intact — a reload still shows the same button, just disabled).
+**On click**, `Grid._runActionGroup()` first collects every `infoType`
+referenced anywhere in the group (deduped, with its current value if any)
+and, only if at least one is missing, awaits ONE dialog (app.js's
+`showUserInfoPrompt`, wired in as `Grid`'s `onNeedUserInfo` option) listing
+ALL of them — not just the missing ones, so an already-known field shows
+up pre-filled and still editable — each optional, in one form instead of a
+native prompt per field. (This replaced an earlier version that called
+`window.prompt()` once per missing field and mislabeled anything besides
+literal `"email"` as "Your name" — a bug from before `infoType` accepted
+arbitrary strings.) Once resolved, each action in order writes its value
+into `cell` via `Grid.setCellValue()` — the same commit path as typing/the
+formula bar/paste, not a parallel one; a field left blank (or the whole
+dialog dismissed) means that one action is skipped, the rest of the
+group's actions and `hideOnClick` still proceed. If `hideOnClick` is
+`TRUE`, the `ACTIONGROUP` cell itself then gets `actionState: {clicked:
+true}` in a separate patch (the formula stays intact — a reload still
+shows the same button, just disabled).
 
 **`saveOnEdit` — catching a hand-typed edit, not just the button.**
 Fernando's own description of why this exists: "the problem is that a
