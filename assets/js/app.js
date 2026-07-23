@@ -557,11 +557,15 @@ async function renderSheet(spreadsheetId, tabId) {
   // exist.
   function updateEffectiveFontOptions() {
     const fmt = grid.getSelectionFormat();
+    // Blank (not "Default"): the real font/size is selected directly below
+    // in its own normal sorted position, so this placeholder has nothing
+    // useful to say except in the one case a real entry can't represent --
+    // a genuinely mixed selection.
     const familyMixed = fmt.fontFamily === FORMAT_MIXED;
-    fontFamilyDefaultOption.textContent = familyMixed ? 'Mixed' : 'Default';
+    fontFamilyDefaultOption.textContent = familyMixed ? 'Mixed' : '';
     fontFamilySelect.value = familyMixed ? '' : (fmt.fontFamily || DEFAULT_FONT_FAMILY);
     const sizeMixed = fmt.fontSize === FORMAT_MIXED;
-    fontSizeDefaultOption.textContent = sizeMixed ? 'Mixed' : 'Default';
+    fontSizeDefaultOption.textContent = sizeMixed ? 'Mixed' : '';
     fontSizeSelect.value = sizeMixed ? '' : String(fmt.fontSize || DEFAULT_FONT_SIZE);
   }
   grid.onSelectionChange = (ref) => {
@@ -620,15 +624,18 @@ async function renderSheet(spreadsheetId, tabId) {
   // Grid already blocks the underlying calls internally when readOnly,
   // but a fully clickable-looking toolbar that silently does nothing on
   // click is exactly the "looks editable, isn't" gap this pass fixes.
-  const fontFamilyDefaultOption = el('option', { value: '' }, 'Default');
+  const fontFamilyDefaultOption = el('option', { value: '' }, '');
   const fontFamilySelect = el('select', {
     class: 'toolbar-select', title: 'Font', disabled: readOnly || null,
     onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
   }, [
     fontFamilyDefaultOption,
-    ...Object.keys(FONT_FAMILIES).map((k) => el('option', { value: k }, k)),
+    // Sorted alphabetically -- same reasoning as FONT_SIZES already being
+    // a naturally ascending array: the effective/default entry should show
+    // up preselected wherever it actually falls in the list, not first.
+    ...Object.keys(FONT_FAMILIES).sort((a, b) => a.localeCompare(b)).map((k) => el('option', { value: k }, k)),
   ]);
-  const fontSizeDefaultOption = el('option', { value: '' }, 'Default');
+  const fontSizeDefaultOption = el('option', { value: '' }, '');
   const fontSizeSelect = el('select', {
     class: 'toolbar-select', title: 'Font size', disabled: readOnly || null,
     onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),
@@ -1430,15 +1437,43 @@ function renderError(e) {
 // have a display-name cookie; never fires again once one's set. Runs
 // before the very first route() so it's the first thing a fresh
 // anonymous visitor sees, on both mobile and desktop.
+//
+// Returns a Promise so boot() can await it -- unlike every other dialog in
+// this app, this one deliberately has NO backdrop-click-to-close and NO
+// Close/Cancel button: a blank submit re-shows a validation message instead
+// of dismissing, since there's no sensible "anonymous with no name at all"
+// state for the rest of the app to fall back to (Fernando: "do not allow
+// closing with an empty value").
 function promptForNameIfNeeded() {
-  if (!isLoggedIn() && !getDisplayName()) {
-    // TODO(next UI pass): replace with a small in-app modal to match the
-    // rest of the app's styling -- left as window.prompt() here since a
-    // broader menu/UI overhaul is already planned as separate follow-up
-    // work and will likely revisit this anyway.
-    const name = window.prompt('What name should we show next to your edits?', '');
-    if (name && name.trim()) setDisplayName(name.trim());
-  }
+  if (isLoggedIn() || getDisplayName()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const input = el('input', { type: 'text', placeholder: 'Your name' });
+    const error = el('p', { class: 'error hidden' });
+    const dialog = el('div', { class: 'modal' }, [
+      el('div', { class: 'modal-content' }, [
+        el('h2', {}, 'Welcome'),
+        el('p', {}, 'What name should we show next to your edits?'),
+        error,
+        el('form', {
+          class: 'inline-form',
+          onsubmit: (e) => {
+            e.preventDefault();
+            const name = input.value.trim();
+            if (!name) {
+              error.textContent = 'Please enter a name to continue.';
+              error.classList.remove('hidden');
+              return;
+            }
+            setDisplayName(name);
+            dialog.remove();
+            resolve();
+          },
+        }, [input, el('button', { class: 'btn', type: 'submit' }, 'Continue')]),
+      ]),
+    ]);
+    document.body.appendChild(dialog);
+    input.focus();
+  });
 }
 
 // "Remember indefinitely" (Fernando) is sliding renewal, not one huge
@@ -1467,7 +1502,7 @@ async function boot() {
       if (e instanceof ApiError && e.status === 401) setToken(null);
     }
   }
-  promptForNameIfNeeded();
+  await promptForNameIfNeeded();
   route();
 }
 

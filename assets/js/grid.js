@@ -1636,24 +1636,38 @@ export class Grid {
 // callers can tell "mixed" apart from "no cell in the selection sets this".
 export const FORMAT_MIXED = '__mixed__';
 
-// Deliberately small, fixed preset lists rather than free-text CSS values
-// (per the "keep it simple" scope for this feature) -- font-family/size
-// pickers offer these labels, format stores the label, rendering maps it
-// to a real CSS value here so the mapping only lives in one place.
-// Every stack here is fonts that already ship with common OSes (Windows/
-// mac/Linux) -- no @font-face, no Google Fonts, nothing fetched over the
-// network (Fernando: "include a few other fonts if possible without
-// downloading fonts from google").
+// Deliberately fixed preset list rather than free-text CSS values (per the
+// "keep it simple" scope for this feature) -- font-family/size pickers
+// offer these labels, format stores the label, rendering maps it to a real
+// CSS value here so the mapping only lives in one place. Every stack here
+// is fonts that already ship with common OSes (Windows/mac/Linux) -- no
+// @font-face, no Google Fonts, nothing fetched over the network (Fernando:
+// "include a few other fonts if possible without downloading fonts from
+// google" / "I want more added"). No generic sans/serif/monospace entries
+// -- Fernando asked for those removed in favor of picking a real font
+// (DEFAULT_FONT_FAMILY below covers the "just give me an ordinary
+// sans-serif" case); `consolas` and `courier new` both map to real
+// monospace stacks so a monospace choice is still available.
 export const FONT_FAMILIES = {
-  sans: 'system-ui, sans-serif',
-  serif: 'Georgia, "Times New Roman", serif',
-  monospace: '"SFMono-Regular", Consolas, monospace',
   arial: 'Arial, Helvetica, sans-serif',
-  'times new roman': '"Times New Roman", Times, serif',
-  georgia: 'Georgia, serif',
+  'arial black': '"Arial Black", Gadget, sans-serif',
+  calibri: 'Calibri, Candara, sans-serif',
+  cambria: 'Cambria, Georgia, serif',
+  'century gothic': '"Century Gothic", Arial, sans-serif',
+  'comic sans ms': '"Comic Sans MS", "Comic Sans", cursive',
+  consolas: 'Consolas, "Courier New", monospace',
   'courier new': '"Courier New", Courier, monospace',
-  verdana: 'Verdana, Geneva, sans-serif',
+  'franklin gothic medium': '"Franklin Gothic Medium", Arial, sans-serif',
+  garamond: 'Garamond, "Times New Roman", serif',
+  georgia: 'Georgia, serif',
+  impact: 'Impact, "Arial Narrow", sans-serif',
+  'lucida sans unicode': '"Lucida Sans Unicode", "Lucida Grande", sans-serif',
+  palatino: '"Palatino Linotype", "Book Antiqua", Palatino, serif',
+  'segoe ui': '"Segoe UI", Tahoma, sans-serif',
+  tahoma: 'Tahoma, Geneva, sans-serif',
+  'times new roman': '"Times New Roman", Times, serif',
   'trebuchet ms': '"Trebuchet MS", sans-serif',
+  verdana: 'Verdana, Geneva, sans-serif',
 };
 
 // format.fontSize is a plain point-size number now (matches Excel/Word's
@@ -1665,11 +1679,12 @@ export const FONT_FAMILIES = {
 export const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72];
 
 // What a cell actually renders as when format.fontFamily/fontSize is unset
-// (see _renderCell above: '' falls through to body's own CSS) -- 'sans'
-// matches body's system-ui stack, and 11 is body's --font-size-base
-// (0.95rem, i.e. ~15.2px at a 16px root) converted to the nearest whole
-// point (1px = 0.75pt) and rounded to the closest FONT_SIZES entry. Used
-// by the toolbar to label its font pickers with the selection's real
-// effective value instead of a generic "Default" placeholder.
-export const DEFAULT_FONT_FAMILY = 'sans';
+// (see _renderCell above: '' falls through to body's own CSS) -- 'arial'
+// is an ordinary, universally-available sans-serif close to body's own
+// system-ui stack, and 11 is body's --font-size-base (0.95rem, i.e.
+// ~15.2px at a 16px root) converted to the nearest whole point (1px =
+// 0.75pt) and rounded to the closest FONT_SIZES entry. Used by the toolbar
+// to preselect the selection's real effective value in its normal sorted
+// list position (see updateEffectiveFontOptions in app.js).
+export const DEFAULT_FONT_FAMILY = 'arial';
 export const DEFAULT_FONT_SIZE = 11;
