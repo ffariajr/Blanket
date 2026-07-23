@@ -32,12 +32,11 @@ exploit — see security-concerns.md for full detail on each.
   (protocol, `tab_id` routing, auth model), so it could never sensibly be
   shared with a future unrelated site on this box anyway.
 
-- **JWTs land in Apache's access logs** (security-concerns.md #3) — decided
-  against the `LogFormat` mitigation (never applied, both vhosts confirmed
-  still plain `combined`). Root-fixing this instead: moving the token from
-  the WS URL's query string into the first `hello` message, so it never
-  appears in Apache's logs at all. In progress — check back once that
-  lands before removing this item.
+- ~~**JWTs land in Apache's access logs**~~ — fixed at the root (security-
+  concerns.md #3): the token now travels in the `hello` message instead of
+  the connect URL, commit `e2c26bf`. Verified live end-to-end after the
+  `blanket-ws` restart — authenticated hello resolves the real identity
+  (not anonymous) and persists correctly; anonymous (no token) unaffected.
 
 - ~~**No `Origin` header validation on the WS handshake**~~ — done, commit
   `303a435`, live since the `blanket-ws` restart.
