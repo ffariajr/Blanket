@@ -26,9 +26,26 @@ logger = logging.getLogger("blanket.presence")
 # other. Degrades to cycling/reuse if more concurrent viewers than colors
 # ever occur (see _assign_color) -- not worth more effort than that at
 # this app's scale (a handful of concurrent editors).
+#
+# Same color renders both a viewer's name in the presence list and their
+# remote-cell-selection highlight (assets/js/app.js) directly against the
+# app's light background (--color-bg #f7f8fa / --color-surface #ffffff,
+# see assets/css/app.css) with no contrast/luminance adjustment -- so
+# every entry here has to be legible on its own, not just "visually
+# distinct" from its neighbors. The original list (a well-known 20-color
+# categorical palette) was picked purely for hue distinctness and included
+# several colors (#46f0f0 cyan, #bcf60c lime, #f58231 orange, #3cb44b
+# green, #f032e6 magenta, #008080 teal, and #e6194b red on the slightly
+# darker --color-bg) that fall well short of WCAG AA's 4.5:1 minimum for
+# normal text -- see BUGS_FOUND.md [034]. Each failing entry below has been
+# darkened (same hue/saturation, lower lightness) just enough to clear
+# 4.5:1 against #f7f8fa (the harder of the two backgrounds, with a small
+# safety margin for rounding) -- entries that already passed are
+# untouched, so some legitimate hue/lightness variety remains; this is not
+# meant to make all 12 look identical.
 _PALETTE = [
-    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#46f0f0",
-    "#f032e6", "#bcf60c", "#008080", "#9a6324", "#800000", "#000075",
+    "#df1849", "#2b8236", "#4363d8", "#bc5309", "#911eb4", "#0a7f7f",
+    "#cb0fc1", "#5e7c05", "#007f7f", "#9a6324", "#800000", "#000075",
 ]
 
 _connection_ids = itertools.count(1)
