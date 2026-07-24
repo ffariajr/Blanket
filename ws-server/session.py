@@ -120,16 +120,25 @@ class TabSession:
 
     async def add_client(self, ws, client_info, presence):
         self.presence = presence
-        # Decide congestion_view_only BEFORE this client is in self.clients
-        # -- _admit_editor's slot count/idle scan must see only the
-        # already-connected peers, not double-count this arriving client.
-        await self._admit_editor(ws, client_info)
+        # _admit_editor (the capacity check + its commit) and adding this
+        # client to self.clients must happen back-to-back with no `await`
+        # in between -- otherwise a concurrently-arriving connection's own
+        # admission check can run (asyncio is cooperative, so it can only
+        # interleave at an `await`) before this client is actually counted,
+        # letting both arrivals see the same "one slot free" state and both
+        # get admitted, overshooting MAX_ACTIVE_EDITORS. See _admit_editor's
+        # docstring. Only the *notification* sends below (which don't
+        # change any accounting) happen after -- the slot bookkeeping is
+        # already fully committed by then.
+        demoted_ws = self._admit_editor(ws, client_info)
         self.clients[ws] = client_info
         await ws.send(json.dumps({
             "type": "state",
             "sequence": self.sequence,
             "data": self.data,
         }))
+        if demoted_ws is not None:
+            await self._send_congestion_demote(demoted_ws)
         if client_info.congestion_view_only:
             await self._send_congestion_demote(ws)
 
@@ -181,37 +190,64 @@ class TabSession:
                     return ws
         return None
 
-    async def _admit_editor(self, ws, client_info):
+    def _admit_editor(self, ws, client_info):
         """Called once, at connect time, for a newly-arriving client
         (not yet in self.clients -- ws is only used here to queue it if
         it ends up congestion-view-only, never to look it up in
         self.clients/presence). Owner and view-only clients are never
         touched -- congestion_view_only stays False (its constructor
-        default) for them unconditionally."""
+        default) for them unconditionally.
+
+        Deliberately a plain (non-async) function: the capacity check
+        (_active_editor_count/_find_idle_active_editor) and its commit
+        (setting congestion_view_only / appending to _congestion_queue)
+        must happen as one uninterrupted synchronous stretch. asyncio is
+        single-threaded and cooperative, so code with no `await` between
+        a check and its matching mutation can never be interleaved by a
+        concurrently-handled connection (same reasoning presence.py's
+        module docstring relies on for its own lock-free dict mutations).
+        Any `await self.something.send(...)` here would hand control back
+        to the event loop mid-decision, letting a second simultaneous
+        arrival's admission check run against a half-updated
+        self.clients/queue and also get admitted -- overshooting
+        MAX_ACTIVE_EDITORS (this genuinely happened pre-fix: see
+        BUGS_FOUND.md).
+
+        Returns the ws of an idle incumbent that was just demoted to make
+        room for this new arrival (the caller sends its notification
+        afterward, once all bookkeeping is committed), or None."""
         if client_info.is_owner or client_info.access_level != "edit":
-            return
+            return None
         if self._active_editor_count() < MAX_ACTIVE_EDITORS:
-            return  # a slot is free -- stays an active editor
+            return None  # a slot is free -- stays an active editor
         idle_ws = self._find_idle_active_editor()
         if idle_ws is not None:
             # Bump the idle incumbent instead of the new arrival -- the
             # new connection takes the freed slot (congestion_view_only
             # stays False for it).
-            await self._demote(idle_ws, notify=True)
-            return
+            self._demote_sync(idle_ws)
+            return idle_ws
         # All 6 slots are full of ACTIVE (non-idle) editors -- the new
         # arrival goes view-only instead, joining the back of the
         # promotion queue like anyone else demoted this way.
         client_info.congestion_view_only = True
         self._congestion_queue.append(ws)
+        return None
 
-    async def _demote(self, ws, notify):
+    def _demote_sync(self, ws):
+        """The check+commit half of a demotion -- see _admit_editor's
+        docstring for why this must stay synchronous (no await) and
+        separate from the notification send. Returns True if ws was
+        actually demoted (False if already gone/already view-only)."""
         client = self.clients.get(ws)
         if client is None or client.congestion_view_only:
-            return
+            return False
         client.congestion_view_only = True
         self._congestion_queue.append(ws)
-        if notify:
+        return True
+
+    async def _demote(self, ws, notify):
+        if self._demote_sync(ws) and notify:
             await self._send_congestion_demote(ws)
 
     async def _promote_next_waiting(self):
