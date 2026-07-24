@@ -16,7 +16,7 @@ RewriteRule ^(src|bin|vendor|db|ws-server)(/|$) - [F,L]
 
 RewriteRule ^dev-router\.php$ - [F,L]
 
-<FilesMatch "\.(env|sql|md|sh|lock|json|log)$">
+<FilesMatch "\.(env|sql|md|sh|lock|json|log|bak|backup|old|orig|save|swp|swo|tmp|temp|txt|dist|out|copy)$">
   Require all denied
 </FilesMatch>
 
