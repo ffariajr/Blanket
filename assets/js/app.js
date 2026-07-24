@@ -235,10 +235,11 @@ async function renderSheetsList() {
 
   const list = el('ul', { class: 'sheet-list' });
   const newTitle = el('input', { type: 'text', placeholder: 'New spreadsheet title' });
+  const search = el('input', { type: 'search', placeholder: 'Filter by title…' });
 
   async function refresh() {
     list.textContent = '';
-    const { spreadsheets } = await api.listSpreadsheets();
+    const { spreadsheets } = await api.listSpreadsheets(search.value.trim());
     for (const s of spreadsheets) {
       const link = el('a', { href: s.guid ? `#/s/${s.guid}` : `#/sheets/${s.id}` }, s.title);
       const li = el('li', {}, [link]);
@@ -282,11 +283,30 @@ async function renderSheetsList() {
     },
   }, [newTitle, el('button', { class: 'btn', type: 'submit' }, 'Create')]);
 
+  // Thin client for the backend's already-working `?title_contains=`
+  // filter (previously had zero UI anywhere -- see BUGS_FOUND.md [027]/
+  // [032]). Debounced the same way the tab-state autosave fallback above
+  // is, just re-querying the list instead of saving.
+  let searchTimer = null;
+  const searchForm = el('form', {
+    class: 'inline-form',
+    onsubmit: (e) => {
+      e.preventDefault();
+      if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+      refresh();
+    },
+  }, [search]);
+  search.addEventListener('input', () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { searchTimer = null; refresh(); }, 250);
+  });
+
   mount(el('div', { class: 'page' }, [
     el('header', { class: 'topbar' }, [
       el('h1', {}, 'Your spreadsheets'),
       el('button', { class: 'link', onclick: () => { setToken(null); window.location.hash = '#/login'; } }, 'Log out'),
     ]),
+    searchForm,
     form,
     list,
   ]));
@@ -1361,7 +1381,7 @@ function showTabMenu(anchorEl, { tabId, tabName, grid, canManage, onRenamed }) {
     items.push(el('label', { class: 'tab-menu-item file-btn' }, [
       'Import CSV',
       el('input', {
-        type: 'file', accept: '.csv',
+        type: 'file', accept: '.csv,text/csv',
         onchange: (e) => { close(); importCsv(tabId, e, grid); },
       }),
     ]));
@@ -1590,8 +1610,26 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
   wireModalA11y(dialog);
 }
 
-function exportCsv(tabId) {
-  window.location.href = api.exportCsvUrl(tabId);
+async function exportCsv(tabId) {
+  // Deliberately NOT `window.location.href = <url>` -- that's a raw
+  // navigation with no custom headers, so it can't carry the Authorization
+  // bearer token the app stores in localStorage, and it 403s the whole app
+  // (replacing the SPA with a bare JSON error page) for any private,
+  // non-anonymous-access spreadsheet. Fetch the CSV as an authenticated
+  // Blob instead and trigger the download via a hidden temporary <a>, the
+  // same pattern used for downloading fetch()ed content without navigating
+  // away.
+  try {
+    const { blob, filename } = await api.exportCsv(tabId);
+    const url = URL.createObjectURL(blob);
+    const link = el('a', { href: url, download: filename });
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert((e && e.message) || 'Could not export CSV.');
+  }
 }
 
 async function importCsv(tabId, event, grid) {
