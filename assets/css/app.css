@@ -223,11 +223,24 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
    indicator, moved here per Fernando: "the thing about how long ago the
    last save was to be next to the spreadsheet name") is the flexible
    element instead, so the two sit together as one unit next to the title
-   rather than the saved indicator living in a separate row below. */
-.topbar-title { display: flex; align-items: baseline; gap: var(--space-2); flex: 1; min-width: 0; }
+   rather than the saved indicator living in a separate row below.
+   min-width was 0 -- allows the title to shrink all the way to nothing
+   instead of ever triggering .topbar's flex-wrap:wrap, since flexbox only
+   wraps once shrinking is actually blocked by a floor. At mobile widths
+   this let the title vanish to 0px while .saved-indicator (flex-shrink:0,
+   so it never shrinks) spilled out of the now-empty .topbar-title and
+   visually overlapped .sheet-actions' buttons. A real floor here is what
+   makes the row wrap onto two lines instead (title+saved above, actions
+   below) once there's genuinely not enough room, matching what flex-wrap
+   was already supposed to do. */
+.topbar-title { display: flex; align-items: baseline; gap: var(--space-2); flex: 1; min-width: 160px; }
 .saved-indicator { font-size: var(--font-size-xs); color: var(--color-text-muted); white-space: nowrap; flex-shrink: 0; }
 
-.sheet-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+/* flex-shrink:0 -- this shouldn't be squeezed by .topbar-title's own
+   shrinking; once there's not enough room for both on one line, .topbar's
+   flex-wrap:wrap should move this whole group to its own line instead,
+   not partially compress it. */
+.sheet-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; flex-shrink: 0; }
 
 /* Connection state (is the live socket up) and who's currently viewing --
    the "last saved" fact used to live in this row too, moved up next to
