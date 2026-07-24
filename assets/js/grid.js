@@ -215,6 +215,22 @@ export class Grid {
     if (ref) this._select(ref, false);
   }
 
+  /** Toggle read-only after construction -- e.g. app.js's WS-session-level
+   * "too many active editors" congestion demotion/promotion (see
+   * ws-server/session.py), layered on top of (never loosening) whatever
+   * this.readOnly was already set to for the user's actual DB-granted
+   * access level. Updates the same .grid-readonly class _build() applies,
+   * without forcing a full rebuild -- toggling it shouldn't blow away
+   * selection/scroll position the way a structural change does. */
+  setReadOnly(value) {
+    this.readOnly = !!value;
+    this._syncReadOnlyClass();
+  }
+
+  _syncReadOnlyClass() {
+    this.container.className = 'grid-scroll' + (this.readOnly ? ' grid-readonly' : '');
+  }
+
   /** First (top-left, reading order) cell not covered by another cell's merge -- normally just "A1". */
   _firstSelectableRef() {
     for (let r = 0; r < this.rows; r++) {
@@ -326,7 +342,7 @@ export class Grid {
     // checks throughout this file. Set here (not just once externally)
     // since _build() re-runs and resets className on every structural
     // rebuild (merge/unmerge, remote patch, resize, insert/delete).
-    this.container.className = 'grid-scroll' + (this.readOnly ? ' grid-readonly' : '');
+    this._syncReadOnlyClass();
     const table = document.createElement('table');
     table.className = 'grid';
     this.table = table;

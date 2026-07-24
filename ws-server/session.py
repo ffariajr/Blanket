@@ -25,6 +25,24 @@ logger = logging.getLogger("blanket.session")
 DEBOUNCE_SECONDS = 5
 MAX_WAIT_SECONDS = 15
 
+# [022] mitigation (BUGS_FOUND.md): edit-broadcast fanout cost within a
+# TabSession scales with its number of ACTIVE simultaneous editors, so
+# capping that at a small constant bounds it at O(MAX_ACTIVE_EDITORS x
+# total_viewers) instead of O(total_viewers^2) in the worst case where
+# every viewer also holds edit access. This is a genuine mitigation, not a
+# fix for the underlying full-roster-rebroadcast design -- see this
+# module's and presence.py's docstrings for that. The tab owner is always
+# exempt (never counts against this cap, never demoted) per Fernando's
+# spec; a plain view-only user was never a candidate for an edit slot in
+# the first place.
+MAX_ACTIVE_EDITORS = 6
+
+CONGESTION_MESSAGE = (
+    "Too many people are editing this sheet right now (limit 6) -- you "
+    "can view live changes, and will be able to edit again once someone "
+    "leaves or goes idle."
+)
+
 
 def pack_ip(ip_str):
     """4 bytes for IPv4, 16 for IPv6 -- matches INET6_ATON()'s output,
@@ -36,10 +54,18 @@ def pack_ip(ip_str):
 
 
 class ClientInfo:
-    def __init__(self, identity, access_level, ip):
+    def __init__(self, identity, access_level, ip, is_owner=False):
         self.identity = identity
         self.access_level = access_level
         self.ip = ip
+        self.is_owner = is_owner
+        # [022] mitigation: session-level-only edit downgrade, layered on
+        # top of access_level rather than replacing it -- this NEVER
+        # touches the user's actual DB-granted access_level/permission
+        # row, only whether THIS live WS connection is currently allowed
+        # to send edits. Only ever True for a non-owner client whose
+        # access_level is already "edit"; see TabSession._admit_editor.
+        self.congestion_view_only = False
 
 
 class TabSession:
@@ -56,6 +82,22 @@ class TabSession:
         self.persist_lock = asyncio.Lock()
         self.debounce_task = None
         self.max_wait_task = None
+        # SpreadsheetPresence for this tab's spreadsheet -- set on the
+        # first add_client (server.py resolves spreadsheet_id/creates the
+        # registry before calling us). Needed for the [022] mitigation's
+        # idle-swap check: presence.py is the existing idle-detection
+        # mechanism (Viewer.active), cross-referenced by websocket to see
+        # which of THIS TabSession's clients is currently idle. Every
+        # client of a given TabSession belongs to the same spreadsheet
+        # (a tab_id has exactly one spreadsheet_id), so this is never
+        # overwritten with a different registry mid-session.
+        self.presence = None
+        # FIFO queue of websockets currently congestion-view-only, in the
+        # order they were demoted -- "longest-waiting" (index 0) is who
+        # gets promoted first when a slot frees up (see
+        # _promote_next_waiting). A ws can appear here at most once at a
+        # time; removed on promotion or disconnect.
+        self._congestion_queue = []
 
     @classmethod
     async def get_or_create(cls, tab_id):
@@ -76,27 +118,150 @@ class TabSession:
                 del self.__class__._sessions[self.tab_id]
                 logger.info("session closed tab_id=%s", self.tab_id)
 
-    async def add_client(self, ws, client_info):
+    async def add_client(self, ws, client_info, presence):
+        self.presence = presence
+        # Decide congestion_view_only BEFORE this client is in self.clients
+        # -- _admit_editor's slot count/idle scan must see only the
+        # already-connected peers, not double-count this arriving client.
+        await self._admit_editor(ws, client_info)
         self.clients[ws] = client_info
         await ws.send(json.dumps({
             "type": "state",
             "sequence": self.sequence,
             "data": self.data,
         }))
+        if client_info.congestion_view_only:
+            await self._send_congestion_demote(ws)
 
     async def remove_client(self, ws):
-        self.clients.pop(ws, None)
+        client = self.clients.pop(ws, None)
+        was_active_editor = (
+            client is not None
+            and client.access_level == "edit"
+            and not client.is_owner
+            and not client.congestion_view_only
+        )
+        if ws in self._congestion_queue:
+            self._congestion_queue.remove(ws)
         if not self.clients:
             # Last viewer gone -- don't leave a document parked only in
             # memory once nobody's watching it.
             await self._flush_if_dirty()
+        elif was_active_editor:
+            # [022] mitigation: this client held one of the 6 active-editor
+            # slots -- freeing it up, so the longest-waiting congestion-
+            # view-only editor (if any) gets promoted into it.
+            await self._promote_next_waiting()
         await self._maybe_close()
+
+    # --- [022] mitigation: active-editor cap -----------------------------
+    #
+    # A non-owner client with access_level "edit" is either an active
+    # editor (congestion_view_only False, one of up to MAX_ACTIVE_EDITORS
+    # slots) or congestion-view-only (session-level-only demotion, queued
+    # for promotion). The owner is never touched by any of this. A plain
+    # view-only client is likewise never touched -- it was never a
+    # candidate for an edit slot.
+
+    def _active_editor_count(self):
+        return sum(
+            1 for c in self.clients.values()
+            if c.access_level == "edit" and not c.is_owner and not c.congestion_view_only
+        )
+
+    def _find_idle_active_editor(self):
+        """A currently-active-editor's ws that presence.py reports idle
+        right now, or None if every active editor is active (or presence
+        isn't wired up yet, which shouldn't happen post-first-client)."""
+        if self.presence is None:
+            return None
+        for ws, c in self.clients.items():
+            if c.access_level == "edit" and not c.is_owner and not c.congestion_view_only:
+                if not self.presence.is_active(ws):
+                    return ws
+        return None
+
+    async def _admit_editor(self, ws, client_info):
+        """Called once, at connect time, for a newly-arriving client
+        (not yet in self.clients -- ws is only used here to queue it if
+        it ends up congestion-view-only, never to look it up in
+        self.clients/presence). Owner and view-only clients are never
+        touched -- congestion_view_only stays False (its constructor
+        default) for them unconditionally."""
+        if client_info.is_owner or client_info.access_level != "edit":
+            return
+        if self._active_editor_count() < MAX_ACTIVE_EDITORS:
+            return  # a slot is free -- stays an active editor
+        idle_ws = self._find_idle_active_editor()
+        if idle_ws is not None:
+            # Bump the idle incumbent instead of the new arrival -- the
+            # new connection takes the freed slot (congestion_view_only
+            # stays False for it).
+            await self._demote(idle_ws, notify=True)
+            return
+        # All 6 slots are full of ACTIVE (non-idle) editors -- the new
+        # arrival goes view-only instead, joining the back of the
+        # promotion queue like anyone else demoted this way.
+        client_info.congestion_view_only = True
+        self._congestion_queue.append(ws)
+
+    async def _demote(self, ws, notify):
+        client = self.clients.get(ws)
+        if client is None or client.congestion_view_only:
+            return
+        client.congestion_view_only = True
+        self._congestion_queue.append(ws)
+        if notify:
+            await self._send_congestion_demote(ws)
+
+    async def _promote_next_waiting(self):
+        while self._congestion_queue:
+            ws = self._congestion_queue.pop(0)
+            client = self.clients.get(ws)
+            if client is None or not client.congestion_view_only:
+                # Disconnected (already pruned by remove_client, belt-and-
+                # suspenders) or somehow already promoted -- skip.
+                continue
+            client.congestion_view_only = False
+            await self._send_congestion_promote(ws)
+            return
+
+    async def handle_active_change(self, ws, active):
+        """Called by server.py's presence_active handling, alongside
+        presence.set_active() -- implements the "ongoing" rule: an active
+        editor going idle only matters here if someone else is actually
+        waiting in congestion-view-only. Becoming active again never
+        forces anything (an idle-demoted user who becomes active again
+        just stays view-only until a slot frees up some other way)."""
+        if active:
+            return
+        client = self.clients.get(ws)
+        if client is None or client.is_owner or client.access_level != "edit":
+            return
+        if client.congestion_view_only:
+            return  # already view-only, nothing to swap
+        if not self._congestion_queue:
+            return  # nobody waiting -- an idle editor keeps its slot
+        await self._demote(ws, notify=True)
+        await self._promote_next_waiting()
+
+    async def _send_congestion_demote(self, ws):
+        try:
+            await ws.send(json.dumps({"type": "congestion_demote", "message": CONGESTION_MESSAGE}))
+        except Exception:
+            logger.exception("congestion_demote send failed, dropping client")
+
+    async def _send_congestion_promote(self, ws):
+        try:
+            await ws.send(json.dumps({"type": "congestion_promote"}))
+        except Exception:
+            logger.exception("congestion_promote send failed, dropping client")
 
     async def handle_new_edit(self, ws, payload):
         from merge_patch import apply_merge_patch
 
         client = self.clients[ws]
-        if client.access_level != "edit":
+        if client.access_level != "edit" or client.congestion_view_only:
             await ws.send(json.dumps({"type": "error", "message": "View-only access"}))
             return
 
@@ -126,8 +291,9 @@ class TabSession:
 
     async def handle_keystroke(self, ws, payload):
         client = self.clients[ws]
-        if client.access_level != "edit":
+        if client.access_level != "edit" or client.congestion_view_only:
             # Ephemeral relay only, but still gated: a view-only client
+            # (permission-based OR the [022] congestion-demoted kind)
             # broadcasting fake "typing" would be confusing/spoofable.
             return
         await self._broadcast_others(ws, {
@@ -138,7 +304,7 @@ class TabSession:
 
     async def handle_save(self, ws):
         client = self.clients[ws]
-        if client.access_level != "edit":
+        if client.access_level != "edit" or client.congestion_view_only:
             await ws.send(json.dumps({"type": "error", "message": "View-only access"}))
             return
         await self._flush_if_dirty()

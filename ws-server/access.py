@@ -23,9 +23,17 @@ class AccessDenied(Exception):
 
 
 def resolve(tab_id, user_id, is_admin):
-    """Returns (spreadsheet_id, access_level) where access_level is
+    """Returns (spreadsheet_id, access_level, is_owner). access_level is
     'view' or 'edit'. Raises AccessDenied otherwise (no access, or the tab
-    / spreadsheet doesn't exist or is deleted)."""
+    / spreadsheet doesn't exist or is deleted).
+
+    is_owner is True only for the actual spreadsheet owner (the DB
+    owner_id match) -- deliberately NOT true for an admin riding the
+    is_admin branch below, since it exists solely to drive session.py's
+    TabSession never-demote exemption for the [022] editor-congestion
+    mitigation, and Fernando's spec is specifically "the tab OWNER", not
+    "anyone with is_admin-granted edit access".
+    """
     tab = db.fetch_tab(tab_id)
     if tab is None or tab["deleted_at"] is not None:
         raise AccessDenied("Tab not found")
@@ -34,8 +42,9 @@ def resolve(tab_id, user_id, is_admin):
     if spreadsheet is None or spreadsheet["deleted_at"] is not None:
         raise AccessDenied("Spreadsheet not found")
 
-    if is_admin or (user_id != 0 and user_id == spreadsheet["owner_id"]):
-        return spreadsheet["id"], "edit"
+    is_owner = user_id != 0 and user_id == spreadsheet["owner_id"]
+    if is_admin or is_owner:
+        return spreadsheet["id"], "edit", is_owner
 
     explicit = db.fetch_access_level(spreadsheet["id"], user_id) if user_id != 0 else None
     anonymous = db.fetch_access_level(spreadsheet["id"], 0)
@@ -44,4 +53,4 @@ def resolve(tab_id, user_id, is_admin):
     if level is None:
         raise AccessDenied("No access to this spreadsheet")
 
-    return spreadsheet["id"], level
+    return spreadsheet["id"], level, False

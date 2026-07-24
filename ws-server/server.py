@@ -37,7 +37,9 @@ Client -> server, after hello:
     Reports a page-visibility/idle-timer change. Rebroadcast (via a
     "presence" message, see below) to every connection across every tab
     of this spreadsheet, not just this tab_id -- presence is spreadsheet-
-    wide (see presence.py).
+    wide (see presence.py). Also feeds session.py's TabSession.
+    handle_active_change() for the per-tab active-editor cap below --
+    going idle can free a slot for a longer-waiting editor.
   {"type": "selection", "selection": {"anchor": "A1", "selected": "B3"} | null}
     Reports the sender's current cell/range selection (anchor === selected
     for a single cell; null for nothing selected). Rebroadcast the same way.
@@ -63,6 +65,18 @@ Server -> client:
     a client can show "someone's on a different tab" (e.g. a color dot on
     that tab in the tab bar) as well as who's on the tab it's actually
     looking at.
+  {"type": "congestion_demote", "message": "..."}
+    [022] mitigation (BUGS_FOUND.md), see session.py's TabSession: this
+    tab already has MAX_ACTIVE_EDITORS (6) non-owner editors actively
+    sending updates, so this connection is downgraded to view-only FOR
+    THIS SESSION ONLY -- never touches the recipient's actual DB-granted
+    access_level/permission row. Only ever sent to a client whose
+    access_level is already "edit" and who isn't the tab's owner (the
+    owner is always exempt). `message` is a ready-to-display explanation.
+  {"type": "congestion_promote"}
+    The session-level congestion downgrade above has been lifted -- this
+    connection can send edits again. No message payload; the client just
+    re-enables its own edit affordances.
 
 Persistence: throttled (see session.py), always a full-document snapshot
 into spreadsheet_history -- never the edit patches themselves.
@@ -145,17 +159,22 @@ async def handle_connection(websocket):
         return
 
     try:
-        spreadsheet_id, access_level = await asyncio.get_running_loop().run_in_executor(
+        spreadsheet_id, access_level, is_owner = await asyncio.get_running_loop().run_in_executor(
             None, access.resolve, tab_id, identity.user_id, identity.is_admin
         )
     except access.AccessDenied as e:
         await websocket.close(code=1008, reason=str(e))
         return
 
-    client_info = ClientInfo(identity, access_level, client_ip(websocket))
+    client_info = ClientInfo(identity, access_level, client_ip(websocket), is_owner)
     session = await TabSession.get_or_create(tab_id)
-    await session.add_client(websocket, client_info)
+    # presence registry resolved before add_client (not after, as before)
+    # -- TabSession.add_client needs it right away for the [022]
+    # active-editor-cap idle-swap check (session.py's
+    # _find_idle_active_editor cross-references presence.is_active() by
+    # websocket for this tab's OTHER already-connected clients).
     presence = SpreadsheetPresence.get_or_create(spreadsheet_id)
+    await session.add_client(websocket, client_info, presence)
     await presence.add_viewer(websocket, tab_id, identity.user_id, identity.display_name, identity.is_anonymous)
     logger.info(
         "client joined tab_id=%s user_id=%s name=%s access=%s",
@@ -177,7 +196,13 @@ async def handle_connection(websocket):
             elif msg_type == "save":
                 await session.handle_save(websocket)
             elif msg_type == "presence_active":
-                await presence.set_active(websocket, bool(message.get("active")))
+                active = bool(message.get("active"))
+                await presence.set_active(websocket, active)
+                # [022] mitigation: an active editor going idle can free
+                # its slot for a longer-waiting congestion-view-only
+                # editor (see TabSession.handle_active_change) -- a no-op
+                # unless someone's actually waiting.
+                await session.handle_active_change(websocket, active)
             elif msg_type == "selection":
                 await presence.set_selection(websocket, message.get("selection"))
     except ConnectionClosed:

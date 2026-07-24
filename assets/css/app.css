@@ -270,6 +270,24 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 .status-dot.status-offline::before { background: var(--color-text-muted); }
 .status-dot.status-connecting::before { background: #d97706; }
 
+/* [022] mitigation (BUGS_FOUND.md): shown only while this session's own
+   WS connection is congestion-demoted to view-only (ws-server/session.py's
+   TabSession active-editor cap) -- a session-level thing, unrelated to a
+   genuine view-only permission (which never shows this, it has no toolbar
+   to demote from in the first place). Same amber tone as the connecting
+   status dot above -- "notice this, but it's not an error" register, not
+   --color-danger. */
+.congestion-banner {
+  background: #fef3e2;
+  border: 1px solid #d97706;
+  color: #7c4a03;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-3);
+}
+.congestion-banner[hidden] { display: none; }
+
 /* Presence: who's viewing this spreadsheet right now (any tab, not just
    this one -- see app.js's renderPresence). Each viewer gets a stable
    per-session color (server-assigned, ws-server/presence.py), reused here

@@ -137,6 +137,19 @@ class SpreadsheetPresence:
             return
         await self.broadcast()
 
+    def is_active(self, ws):
+        """Cross-referenced by session.py's TabSession to find whether one
+        of ITS clients is currently idle (see the [022] editor-congestion
+        mitigation) -- ws is the same websocket object shared between this
+        registry and TabSession.clients. Treats an unregistered ws (not
+        yet added, or already removed) as active, i.e. never a candidate
+        for the idle-demotion swap -- there's no idle *signal* to trust
+        either way, and defaulting to "not idle" is the conservative
+        choice (never wrongly evicts someone we actually know nothing
+        about)."""
+        viewer = self.viewers.get(ws)
+        return viewer.active if viewer is not None else True
+
     async def set_active(self, ws, active):
         viewer = self.viewers.get(ws)
         if viewer is None or viewer.active == active:

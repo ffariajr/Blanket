@@ -16,7 +16,7 @@ const EDIT_DEBOUNCE_MS = 400;
 const SELECTION_DEBOUNCE_MS = 120;
 
 export class TabSocket {
-  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError, onPresence, onFlushFailed }) {
+  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError, onPresence, onFlushFailed, onCongestionDemote, onCongestionPromote }) {
     this.tabId = tabId;
     this.onState = onState || (() => {});
     this.onRemoteEdit = onRemoteEdit || (() => {});
@@ -24,6 +24,15 @@ export class TabSocket {
     this.onSaved = onSaved || (() => {});
     this.onStatus = onStatus || (() => {});
     this.onPresence = onPresence || (() => {});
+    // Session-level (WS-layer only, never touches this user's actual
+    // DB-granted access_level) editor-congestion mitigation -- see
+    // ws-server/session.py's TabSession active-editor cap (BUGS_FOUND.md
+    // [022]: unbounded simultaneous editors makes edit-broadcast fanout
+    // cost scale badly). Only ever sent to clients who actually have
+    // edit access in the first place; a view-only viewer never receives
+    // either message.
+    this.onCongestionDemote = onCongestionDemote || (() => {});
+    this.onCongestionPromote = onCongestionPromote || (() => {});
     // Fires when a queued edit's debounce elapses and finds the socket
     // already dead (e.g. it dropped mid-debounce) -- see BUGS_FOUND.md
     // [003]: without this, an edit committed right before a disconnect
@@ -101,6 +110,12 @@ export class TabSocket {
           break;
         case 'presence':
           this.onPresence(msg.viewers);
+          break;
+        case 'congestion_demote':
+          this.onCongestionDemote(msg.message);
+          break;
+        case 'congestion_promote':
+          this.onCongestionPromote();
           break;
       }
     });

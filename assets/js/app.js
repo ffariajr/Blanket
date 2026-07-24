@@ -653,7 +653,7 @@ async function renderSheet(spreadsheetId, tabId) {
   // click is exactly the "looks editable, isn't" gap this pass fixes.
   const fontFamilyDefaultOption = el('option', { value: '' }, '');
   const fontFamilySelect = el('select', {
-    class: 'toolbar-select', title: 'Font', disabled: readOnly || null,
+    class: 'toolbar-select', title: 'Font', disabled: readOnly || null, 'data-edit-control': '',
     onchange: (e) => grid.applyFormatToSelection({ fontFamily: e.target.value || undefined }),
   }, [
     fontFamilyDefaultOption,
@@ -664,36 +664,36 @@ async function renderSheet(spreadsheetId, tabId) {
   ]);
   const fontSizeDefaultOption = el('option', { value: '' }, '');
   const fontSizeSelect = el('select', {
-    class: 'toolbar-select', title: 'Font size', disabled: readOnly || null,
+    class: 'toolbar-select', title: 'Font size', disabled: readOnly || null, 'data-edit-control': '',
     onchange: (e) => grid.applyFormatToSelection({ fontSize: e.target.value ? Number(e.target.value) : undefined }),
   }, [
     fontSizeDefaultOption,
     ...FONT_SIZES.map((size) => el('option', { value: String(size) }, String(size))),
   ]);
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', 'aria-label': 'Bold', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', 'aria-label': 'Italic', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', 'aria-label': 'Underline', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', 'aria-label': 'Bold', disabled: readOnly || null, 'data-edit-control': '', onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', 'aria-label': 'Italic', disabled: readOnly || null, 'data-edit-control': '', onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', 'aria-label': 'Underline', disabled: readOnly || null, 'data-edit-control': '', onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
     el('input', {
-      class: 'btn-color', type: 'color', title: 'Text color', disabled: readOnly || null,
+      class: 'btn-color', type: 'color', title: 'Text color', disabled: readOnly || null, 'data-edit-control': '',
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
     }),
     el('input', {
-      class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff', disabled: readOnly || null,
+      class: 'btn-color', type: 'color', title: 'Background', value: '#ffffff', disabled: readOnly || null, 'data-edit-control': '',
       onchange: (e) => grid.applyFormatToSelection({ bg: e.target.value }),
     }),
     fontFamilySelect,
     fontSizeSelect,
-    el('button', { class: 'btn btn-secondary btn-small', title: 'Wrap text', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
+    el('button', { class: 'btn btn-secondary btn-small', title: 'Wrap text', disabled: readOnly || null, 'data-edit-control': '', onclick: () => grid.toggleFormatOnSelection('wrap') }, 'Wrap'),
     el('button', {
-      class: 'btn btn-secondary btn-small', title: 'Merge selected cells', disabled: readOnly || null,
+      class: 'btn btn-secondary btn-small', title: 'Merge selected cells', disabled: readOnly || null, 'data-edit-control': '',
       onclick: () => {
         const result = grid.mergeSelection();
         if (!result.ok) alert(result.error);
       },
     }, 'Merge'),
     el('button', {
-      class: 'btn btn-secondary btn-small', title: 'Unmerge', disabled: readOnly || null,
+      class: 'btn btn-secondary btn-small', title: 'Unmerge', disabled: readOnly || null, 'data-edit-control': '',
       onclick: () => {
         const result = grid.unmergeSelection();
         if (!result.ok) alert(result.error);
@@ -703,6 +703,32 @@ async function renderSheet(spreadsheetId, tabId) {
     tabMenuBtn,
   ]);
   updateEffectiveFontOptions();
+
+  // [022] mitigation (BUGS_FOUND.md): ws-server/session.py's TabSession
+  // caps a tab at 6 simultaneous ACTIVE non-owner editors -- a 7th
+  // connects (or an active editor stays active while a slot is needed)
+  // gets session-level-only downgraded to view-only over the WS
+  // connection, NOT a change to this user's actual DB-granted access
+  // (`readOnly`/`spreadsheet.my_access` above are untouched). Reuses the
+  // exact same "disable the edit affordances" mechanism the real
+  // readOnly permission already uses (Grid.setReadOnly + the toolbar's
+  // `[data-edit-control]`/formulaInput disabled state) rather than a
+  // parallel one -- effective read-only is just `readOnly ||
+  // congestionViewOnly`, so this only ever ADDS restriction, never lifts
+  // a genuine view-only user's real restriction.
+  let congestionViewOnly = false;
+  const congestionBanner = el('div', { class: 'congestion-banner', hidden: true });
+  function applyCongestionState(isViewOnly, message) {
+    congestionViewOnly = isViewOnly;
+    const effectiveReadOnly = readOnly || congestionViewOnly;
+    grid.setReadOnly(effectiveReadOnly);
+    formulaInput.disabled = effectiveReadOnly;
+    toolbar.querySelectorAll('[data-edit-control]').forEach((control) => {
+      control.disabled = effectiveReadOnly;
+    });
+    congestionBanner.hidden = !isViewOnly;
+    congestionBanner.textContent = isViewOnly ? message : '';
+  }
 
   // Rename (spreadsheet title), Manage tabs, and Share are all owner-only
   // (TabController's create/rename/reorder/delete now gate on canManage,
@@ -726,6 +752,7 @@ async function renderSheet(spreadsheetId, tabId) {
       actions,
     ]),
     el('div', { class: 'status-row' }, [connectionEl, presenceListEl]),
+    congestionBanner,
     tabNav,
     toolbar,
     formulaBar.el,
@@ -809,6 +836,13 @@ async function renderSheet(spreadsheetId, tabId) {
       presenceViewers = viewers;
       renderPresence();
     },
+    // [022] mitigation -- see applyCongestionState above. Only ever
+    // arrives for a client that already has real edit access (the owner
+    // is exempt server-side and a real view-only user never receives
+    // either message), so there's no need to re-check `readOnly` here
+    // before applying it.
+    onCongestionDemote: (message) => applyCongestionState(true, message),
+    onCongestionPromote: () => applyCongestionState(false, null),
   });
   socket.connect();
 
