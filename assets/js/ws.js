@@ -16,7 +16,7 @@ const EDIT_DEBOUNCE_MS = 400;
 const SELECTION_DEBOUNCE_MS = 120;
 
 export class TabSocket {
-  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError, onPresence }) {
+  constructor(tabId, { onState, onRemoteEdit, onRemoteKeystroke, onSaved, onStatus, onServerError, onPresence, onFlushFailed }) {
     this.tabId = tabId;
     this.onState = onState || (() => {});
     this.onRemoteEdit = onRemoteEdit || (() => {});
@@ -24,6 +24,13 @@ export class TabSocket {
     this.onSaved = onSaved || (() => {});
     this.onStatus = onStatus || (() => {});
     this.onPresence = onPresence || (() => {});
+    // Fires when a queued edit's debounce elapses and finds the socket
+    // already dead (e.g. it dropped mid-debounce) -- see BUGS_FOUND.md
+    // [003]: without this, an edit committed right before a disconnect
+    // was silently and permanently lost, since app.js's REST fallback
+    // (localSaveFallbackTimer) only ever checked isConnected() at
+    // edit-time, before the WS debounce had any chance to fail.
+    this.onFlushFailed = onFlushFailed || (() => {});
     // Server-side rejections (e.g. "View-only access" when an edit is
     // attempted without edit rights, "Tab not found") used to only reach
     // console.warn below -- the connection itself stays open and the
@@ -180,7 +187,18 @@ export class TabSocket {
 
   _flushEdit() {
     this._editTimer = null;
-    if (!this._pendingPatch || !this.isConnected()) return;
+    if (!this._pendingPatch) return;
+    if (!this.isConnected()) {
+      // The debounce elapsed after the socket had already died -- this
+      // patch was never sent and never will be over a dead connection.
+      // Previously this just silently `return`ed, permanently losing the
+      // edit unless the user happened to make another one afterward (see
+      // BUGS_FOUND.md [003]). Signal the caller so it can requeue/persist
+      // via the REST fallback instead; keep _pendingPatch around (rather
+      // than clearing it) so a caller that inspects it can still see it.
+      this.onFlushFailed(this._pendingPatch);
+      return;
+    }
     this._send({ type: 'new_edit', payload: this._pendingPatch });
     this._pendingPatch = null;
   }

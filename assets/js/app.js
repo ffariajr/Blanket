@@ -727,7 +727,7 @@ async function renderSheet(spreadsheetId, tabId) {
       try {
         await api.saveTabState(
           tabId,
-          { cells: grid.cells, columnWidths: grid.columnWidths, rowHeights: grid.rowHeights },
+          { cells: grid.cells, columnWidths: grid.columnWidths, rowHeights: grid.rowHeights, cols: grid.cols, rows: grid.rows },
           getDisplayName(),
         );
         lastSavedAt = new Date();
@@ -746,6 +746,15 @@ async function renderSheet(spreadsheetId, tabId) {
     onRemoteKeystroke: () => {
       /* could show a "someone is typing" indicator; kept minimal */
     },
+    // The WS debounce found the socket already dead when it went to send
+    // (see ws.js's _flushEdit) -- this edit was never sent and never will
+    // be over that connection. isConnected() is false by now (that's
+    // exactly why this fired), so localSaveFallbackTimer() below will
+    // correctly schedule a REST save of the current in-memory grid.cells
+    // (which already includes this edit, applied optimistically before
+    // queueEdit was ever called) instead of silently losing it -- see
+    // BUGS_FOUND.md [003].
+    onFlushFailed: () => localSaveFallbackTimer(),
     onSaved: () => {
       lastSavedAt = new Date();
       renderSavedLabel();
