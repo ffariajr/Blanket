@@ -956,6 +956,7 @@ export class Grid {
     if (!td || td.dataset.ref === this.selected) return;
     this.selected = td.dataset.ref;
     this._highlightRange(this.anchor, this.selected);
+    if (this.onSelectionChange) this.onSelectionChange(this.selected);
   }
 
   _onMouseUp() {

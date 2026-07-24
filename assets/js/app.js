@@ -521,8 +521,14 @@ async function renderSheet(spreadsheetId, tabId) {
     type: 'text', class: 'formula-input', placeholder: 'Select a cell to edit its value or formula',
     disabled: readOnly || null,
     onkeydown: (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); formulaInput.blur(); }
-      else if (e.key === 'Escape') { formulaBar.onSelect(grid.selected); formulaInput.blur(); }
+      // stopPropagation matters here: blur() below moves focus synchronously,
+      // so by the time this keydown would otherwise bubble to grid.js's
+      // document-level _onKeyDown, activeElement is no longer this input --
+      // _keyboardShouldDeferToOtherControl() no longer defers, and the same
+      // Enter keystroke would reopen the just-committed cell for inline
+      // editing.
+      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); formulaInput.blur(); }
+      else if (e.key === 'Escape') { e.stopPropagation(); formulaBar.onSelect(grid.selected); formulaInput.blur(); }
     },
     onblur: () => {
       if (grid.selected && !readOnly) grid.setCellValue(grid.selected, formulaInput.value);
