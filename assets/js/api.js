@@ -197,6 +197,10 @@ export const api = {
 
   listSpreadsheets: (titleContains) =>
     request('GET', titleContains ? `/spreadsheets?title_contains=${encodeURIComponent(titleContains)}` : '/spreadsheets'),
+  listMySpreadsheets: (titleContains) =>
+    request('GET', titleContains ? `/spreadsheets/mine?title_contains=${encodeURIComponent(titleContains)}` : '/spreadsheets/mine'),
+  listSharedSpreadsheets: (titleContains) =>
+    request('GET', titleContains ? `/spreadsheets/shared?title_contains=${encodeURIComponent(titleContains)}` : '/spreadsheets/shared'),
   createSpreadsheet: (title) => request('POST', '/spreadsheets', { title }),
   getSpreadsheet: (id) => request('GET', `/spreadsheets/${id}`),
   getSpreadsheetByGuid: (guid) => request('GET', `/spreadsheets/guid/${encodeURIComponent(guid)}`),

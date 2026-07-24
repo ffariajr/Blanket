@@ -234,42 +234,81 @@ async function renderSheetsList() {
   if (!isLoggedIn()) return (window.location.hash = '#/login');
 
   const list = el('ul', { class: 'sheet-list' });
+  const sharedHeading = el('h3', {}, 'Shared with me');
+  const sharedList = el('ul', { class: 'sheet-list' });
+  // Whole section (heading + list) hidden entirely -- not just an empty
+  // list under a heading -- when nothing is shared with this user (per
+  // Fernando: omit the section altogether, don't show an empty heading).
+  const sharedSection = el('div', { class: 'hidden' }, [sharedHeading, sharedList]);
   const newTitle = el('input', { type: 'text', placeholder: 'New spreadsheet title' });
   const search = el('input', { type: 'search', placeholder: 'Filter by title…' });
 
   async function refresh() {
     list.textContent = '';
-    const { spreadsheets } = await api.listSpreadsheets(search.value.trim());
-    for (const s of spreadsheets) {
+    sharedList.textContent = '';
+    const titleContains = search.value.trim();
+    const [{ spreadsheets: owned }, { spreadsheets: shared }] = await Promise.all([
+      api.listMySpreadsheets(titleContains),
+      api.listSharedSpreadsheets(titleContains),
+    ]);
+
+    for (const s of owned) {
       const link = el('a', { href: s.guid ? `#/s/${s.guid}` : `#/sheets/${s.id}` }, s.title);
       const li = el('li', {}, [link]);
 
-      // Owner gets "Duplicate" (asks about sharing settings first); a
-      // logged-in editor/viewer gets "Make a copy" (no dialog -- always
-      // private, since they can't see the sharing list to begin with,
-      // per Permissions::canManage()). Anonymous/no-access: no button --
-      // there's no account to own the resulting copy under.
-      if (s.my_access === 'owner') {
-        li.appendChild(el('button', {
-          class: 'btn btn-small',
-          onclick: async () => {
-            const shareToo = await showConfirm("Also duplicate this spreadsheet's sharing settings?", { confirmLabel: 'Yes', cancelLabel: 'No' });
-            await api.duplicateSpreadsheet(s.id, shareToo);
-            await refresh();
-          },
-        }, 'Duplicate'));
-      } else if (s.my_access === 'edit' || s.my_access === 'view') {
-        li.appendChild(el('button', {
-          class: 'btn btn-small',
-          onclick: async () => {
-            await api.duplicateSpreadsheet(s.id, false);
-            await refresh();
-          },
-        }, 'Make a copy'));
-      }
+      // The viewer owns every row in this list -- always "Duplicate" (asks
+      // about sharing settings first, since only an owner can see/copy the
+      // sharing list -- Permissions::canManage()).
+      li.appendChild(el('button', {
+        class: 'btn btn-small',
+        onclick: async () => {
+          const shareToo = await showConfirm("Also duplicate this spreadsheet's sharing settings?", { confirmLabel: 'Yes', cancelLabel: 'No' });
+          await api.duplicateSpreadsheet(s.id, shareToo);
+          await refresh();
+        },
+      }, 'Duplicate'));
 
       list.appendChild(li);
     }
+
+    for (const s of shared) {
+      const link = el('a', { href: s.guid ? `#/s/${s.guid}` : `#/sheets/${s.id}` }, s.title);
+      const meta = el('span', { class: 'muted' }, `Shared by ${s.owner_name} · ${s.access_level} access`);
+      const li = el('li', {}, [link, meta]);
+
+      // Every shared row (view or edit) gets "Make a copy" -- no dialog,
+      // always private, since a non-owner can't see the sharing list to
+      // begin with (Permissions::canManage()).
+      li.appendChild(el('button', {
+        class: 'btn btn-small',
+        onclick: async () => {
+          await api.duplicateSpreadsheet(s.id, false);
+          await refresh();
+        },
+      }, 'Make a copy'));
+
+      // Self-service "leave a shared spreadsheet" (AccessController::
+      // revoke() now allows a user to revoke their OWN access, see BUGS_
+      // FOUND.md [023] follow-up) -- confirmed via the app's own modal
+      // dialog, not window.confirm() (BUGS_FOUND.md [033]).
+      li.appendChild(el('button', {
+        class: 'btn btn-small btn-secondary',
+        onclick: async () => {
+          const confirmed = await showConfirm(
+            'Leave this spreadsheet? You will lose access to it unless the owner shares it with you again.',
+            { confirmLabel: 'Leave', cancelLabel: 'Cancel' },
+          );
+          if (!confirmed) return;
+          const me = getCurrentUser();
+          await api.revokeAccess(s.id, me.id);
+          await refresh();
+        },
+      }, 'Leave'));
+
+      sharedList.appendChild(li);
+    }
+
+    sharedSection.classList.toggle('hidden', shared.length === 0);
   }
 
   const form = el('form', {
@@ -286,7 +325,9 @@ async function renderSheetsList() {
   // Thin client for the backend's already-working `?title_contains=`
   // filter (previously had zero UI anywhere -- see BUGS_FOUND.md [027]/
   // [032]). Debounced the same way the tab-state autosave fallback above
-  // is, just re-querying the list instead of saving.
+  // is, just re-querying the list instead of saving. Applies to both the
+  // owned and shared sections -- both repository methods accept the same
+  // filter (SpreadsheetRepository::listOwnedByUser()/listSharedWithUser()).
   let searchTimer = null;
   const searchForm = el('form', {
     class: 'inline-form',
@@ -309,6 +350,7 @@ async function renderSheetsList() {
     searchForm,
     form,
     list,
+    sharedSection,
   ]));
 
   await refresh();

@@ -34,18 +34,6 @@ final class SpreadsheetRepository
     }
 
     /**
-     * Spreadsheets owned by the user, or where the user has an explicit
-     * spreadsheet_access row.
-     *
-     * Uses two distinct placeholders for the same value on purpose: with
-     * PDO::ATTR_EMULATE_PREPARES => false (native prepares, see Db.php),
-     * MySQL's native protocol does not support reusing one named
-     * placeholder for multiple positions in a query -- binding the same
-     * name twice throws SQLSTATE[HY093] at execute() time, since one bound
-     * value can't fill two slots. This is a systemic risk, not a one-off:
-     * any query with a repeated :name is broken under this driver config.
-     */
-    /**
      * $titleContains: case-insensitive substring match (Fernando: "query my
      * spreadsheets, filter with 'TEMPLATE' in the name"). LOWER() on both
      * sides rather than relying on the column's collation being
@@ -53,25 +41,70 @@ final class SpreadsheetRepository
      * is collated. `%`/`_`/`\` in the search string are escaped so a title
      * like "50% off" can't be misread as a LIKE wildcard.
      */
-    public function listForUser(int $userId, ?string $titleContains = null): array
+    private function escapeTitleContains(string $titleContains): string
     {
-        $sql = 'SELECT DISTINCT s.id, s.guid, s.owner_id, s.title, s.created_at, s.updated_at, s.deleted_at
-             FROM spreadsheets s
-             LEFT JOIN spreadsheet_access a ON a.spreadsheet_id = s.id AND a.user_id = :user_id1
-             WHERE s.deleted_at IS NULL AND (s.owner_id = :user_id2 OR a.id IS NOT NULL)';
-        $params = ['user_id1' => $userId, 'user_id2' => $userId];
+        return '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $titleContains) . '%';
+    }
+
+    /**
+     * Spreadsheets this user owns. A direct index seek on idx_spreadsheets_
+     * owner (db/schemas.md) -- no join needed, since the owner already IS
+     * the highest access level, there's no separate access-level/owner-name
+     * to compute or select for these rows.
+     *
+     * Split from the old listForUser() (see BUGS_FOUND.md [023]): that
+     * single LEFT JOIN + OR query defeated index use for both halves of the
+     * OR. This half and listSharedWithUser() below are each a plain,
+     * independently-indexed seek instead.
+     */
+    public function listOwnedByUser(int $userId, ?string $titleContains = null): array
+    {
+        $sql = 'SELECT id, guid, owner_id, title, created_at, updated_at, deleted_at
+             FROM spreadsheets
+             WHERE owner_id = :user_id AND deleted_at IS NULL';
+        $params = ['user_id' => $userId];
 
         if ($titleContains !== null && $titleContains !== '') {
-            $escaped = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $titleContains);
+            $sql .= ' AND LOWER(title) LIKE LOWER(:title_contains) ESCAPE \'\\\\\'';
+            $params['title_contains'] = $this->escapeTitleContains($titleContains);
+        }
+
+        $sql .= ' ORDER BY updated_at DESC';
+
+        $stmt = Db::connection()->prepare($sql);
+        $stmt->execute($params);
+        return array_map($this->cast(...), $stmt->fetchAll());
+    }
+
+    /**
+     * Spreadsheets shared with this user via an explicit spreadsheet_access
+     * row (not owned by them). Driven by an index seek on idx_access_user
+     * (spreadsheet_access.user_id, db/schemas.md), then a PK join to
+     * spreadsheets and users for the handful of matching rows -- no OR, no
+     * LEFT JOIN, no DISTINCT needed since (spreadsheet_id, user_id) is
+     * unique.
+     *
+     * @return list<array{id:int,guid:string,title:string,created_at:string,updated_at:string,owner_id:int,owner_name:string,access_level:string}>
+     */
+    public function listSharedWithUser(int $userId, ?string $titleContains = null): array
+    {
+        $sql = 'SELECT s.id, s.guid, s.title, s.created_at, s.updated_at, s.owner_id, u.display_name AS owner_name, a.access_level
+             FROM spreadsheets s
+             JOIN spreadsheet_access a ON a.spreadsheet_id = s.id
+             JOIN users u ON u.id = s.owner_id
+             WHERE a.user_id = :user_id AND s.deleted_at IS NULL';
+        $params = ['user_id' => $userId];
+
+        if ($titleContains !== null && $titleContains !== '') {
             $sql .= ' AND LOWER(s.title) LIKE LOWER(:title_contains) ESCAPE \'\\\\\'';
-            $params['title_contains'] = '%' . $escaped . '%';
+            $params['title_contains'] = $this->escapeTitleContains($titleContains);
         }
 
         $sql .= ' ORDER BY s.updated_at DESC';
 
         $stmt = Db::connection()->prepare($sql);
         $stmt->execute($params);
-        return array_map($this->cast(...), $stmt->fetchAll());
+        return $stmt->fetchAll();
     }
 
     public function create(int $ownerId, string $title): int

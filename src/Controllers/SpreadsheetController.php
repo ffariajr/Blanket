@@ -25,6 +25,13 @@ final class SpreadsheetController
     ) {
     }
 
+    /**
+     * GET /api/spreadsheets -- everything this user can see (owned + shared),
+     * merged and re-sorted by updated_at, each row carrying my_access same as
+     * before this endpoint had a dedicated owned/shared split. Kept as a
+     * superset "give me everything" endpoint; mine()/shared() below are the
+     * two split views the sheets-list UI actually uses.
+     */
     public function index(Request $request): void
     {
         $user = Authenticator::resolve($request);
@@ -34,22 +41,49 @@ final class SpreadsheetController
             Response::error('Authentication required', 401);
         }
 
-        // ?title_contains=... : case-insensitive substring filter (Fernando:
-        // "query my spreadsheets, filter with 'TEMPLATE' in the name").
-        // Omitted entirely -> unfiltered, exactly like before this existed.
-        $titleContains = $request->query('title_contains');
-
-        // my_access per row, same field show()/byGuid() already compute --
-        // the books-menu list needs it to decide "Duplicate" (owner) vs.
-        // "Make a copy" (edit/view) vs. no button at all.
-        $spreadsheets = array_map(
-            function (array $s) use ($user) {
-                $s['my_access'] = $this->permissions->levelFor($s, $user);
-                return $s;
-            },
-            $this->spreadsheets->listForUser($user->id, is_string($titleContains) ? $titleContains : null),
+        $filter = $this->titleFilter($request);
+        $rows = array_merge(
+            $this->spreadsheets->listOwnedByUser($user->id, $filter),
+            $this->spreadsheets->listSharedWithUser($user->id, $filter),
         );
-        Response::json(['spreadsheets' => $spreadsheets]);
+        usort($rows, fn (array $a, array $b) => strcmp($b['updated_at'], $a['updated_at']));
+        foreach ($rows as &$row) {
+            $row['my_access'] = $this->permissions->levelFor($row, $user);
+        }
+        unset($row);
+
+        Response::json(['spreadsheets' => $rows]);
+    }
+
+    /** GET /api/spreadsheets/mine -- only spreadsheets this user owns. */
+    public function mine(Request $request): void
+    {
+        $user = Authenticator::resolve($request);
+        if ($user->isAnonymous()) {
+            Response::error('Authentication required', 401);
+        }
+
+        Response::json(['spreadsheets' => $this->spreadsheets->listOwnedByUser($user->id, $this->titleFilter($request))]);
+    }
+
+    /** GET /api/spreadsheets/shared -- only spreadsheets explicitly shared with this user (not owned). */
+    public function shared(Request $request): void
+    {
+        $user = Authenticator::resolve($request);
+        if ($user->isAnonymous()) {
+            Response::error('Authentication required', 401);
+        }
+
+        Response::json(['spreadsheets' => $this->spreadsheets->listSharedWithUser($user->id, $this->titleFilter($request))]);
+    }
+
+    // ?title_contains=... : case-insensitive substring filter (Fernando:
+    // "query my spreadsheets, filter with 'TEMPLATE' in the name").
+    // Omitted entirely -> unfiltered, exactly like before this existed.
+    private function titleFilter(Request $request): ?string
+    {
+        $titleContains = $request->query('title_contains');
+        return is_string($titleContains) ? $titleContains : null;
     }
 
     public function create(Request $request): void

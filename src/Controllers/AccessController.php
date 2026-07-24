@@ -48,10 +48,31 @@ final class AccessController
         Response::json(['status' => 'ok']);
     }
 
+    /**
+     * Owner/admin can revoke anyone's access (requireManageable() below).
+     * In ADDITION -- a narrow allow-list addition, not a loosening of that
+     * rule -- any authenticated user may always revoke their OWN access
+     * (self-service "leave a shared spreadsheet"): the requesting user's id
+     * equals the {user_id} in the URL. This does not let a non-owner/
+     * non-admin revoke someone ELSE's access; that path is still gated by
+     * canManage() exactly as before. An owner has no spreadsheet_access row
+     * to begin with (db/schemas.md: "The owner never gets a row here"), so
+     * this self-revoke path is naturally a no-op for an owner calling it on
+     * themselves -- correct, since there's nothing for an owner to "leave".
+     */
     public function revoke(Request $request): void
     {
-        $spreadsheet = $this->requireManageable($request);
+        $user = Authenticator::resolve($request);
+        $spreadsheet = $this->spreadsheets->find((int) $request->params['spreadsheet_id']);
+        if ($spreadsheet === null) {
+            Response::error('Not found', 404);
+        }
         $userId = (int) $request->params['user_id'];
+
+        $isSelfRevoke = !$user->isAnonymous() && $user->id === $userId;
+        if (!$isSelfRevoke && !$this->permissions->canManage($spreadsheet, $user)) {
+            Response::error('Forbidden', 403);
+        }
 
         $this->access->revoke($spreadsheet['id'], $userId);
         Response::json(['status' => 'ok']);
