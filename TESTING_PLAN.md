@@ -56,8 +56,9 @@ Auth is JWT (HS256), shared secret between the PHP side and the WS server,
 carried in the WebSocket's first `hello` message (not the connect URL — see
 Section A item 1, this was a real fix this session).
 
-**Read these project docs, in this order, before doing anything else** (all
-paths relative to `/home/claude/blanket`):
+**Get oriented by reading these project docs before doing anything else**
+(all paths relative to `/home/claude/blanket` — the order below is a
+reasonable starting suggestion, not a mandated sequence):
 1. `README.md` — what the app does and its feature list, ~1 minute read.
 2. `MACHINE.md`, `REQUIREMENTS.md`, `ACCESS.md` — the hosting environment
    (this Linux user's constraints, what needs root vs. doesn't, what access
@@ -85,13 +86,14 @@ paths relative to `/home/claude/blanket`):
 This is **not** a single afternoon's work and should not be run as one
 `Workflow` call. Six genuinely distinct areas (full functional regression,
 mobile parity, security, performance, a full WS-collaborator-count matrix,
-plus two bugs to actually fix) each warrant their own `Workflow` invocation
-with its own dimension breakdown, run **sequentially or in a deliberately
-staged order** (see "Suggested sequencing" at the end), not crammed into one
-mega-script. Treat each major section below as its own `Workflow` call at
-minimum; some (Section A, Section E) likely warrant more than one. Err
-toward thoroughness — this is exactly the wrong place to cut scope to save
-time, per Fernando's own stated purpose.
+plus two bugs to actually fix) are too large for a single `Workflow`
+invocation to do justice to. Decide your own decomposition into `Workflow`
+calls — by section, by sub-area, whatever structure actually serves the
+work; "Suggested sequencing" below is a starting point, not a mandate — run
+them sequentially or in a deliberately staged order, and make sure every
+area gets genuinely dedicated attention rather than being folded in as an
+afterthought to a bigger one. Err toward thoroughness — this is exactly the
+wrong place to cut scope to save time, per Fernando's own stated purpose.
 
 ## Ground rules (apply to every section, every agent)
 
@@ -197,7 +199,13 @@ time, per Fernando's own stated purpose.
   topbar layout, Share dialog, sheets-list overflow, Manage Tabs button
   size). Don't assume anything not explicitly listed as "already
   re-verified" is still correct — a full regression sweep is warranted, not
-  spot-checks.
+  spot-checks. Sections below name the areas/mechanisms that need coverage —
+  that's the real self-sufficiency content, telling you WHAT changed and
+  needs checking — but they deliberately don't cite a commit hash for every
+  single item. Where you want the specifics of a particular change, run your
+  own `git log --oneline`/`git show`/read the code directly; trust your own
+  investigation there rather than expecting a pre-digested diff list for
+  everything.
 
 - **Already known and deliberately accepted — do NOT re-flag as findings:**
   no login rate-limiting (Fernando explicitly considered and declined this —
@@ -269,23 +277,22 @@ original exhaustive-test workflow, which worked well):
 1. **Auth & permissions.** Login success/failure, JWT expiry AND the 6-month
    sliding renewal (`POST /api/session/renew`, seeded silently for a
    logged-in user with no cookie, required dialog only for anonymous with no
-   cookie), the permissive anonymous-fallback change (commit `0431c71`: a
-   logged-in user with no explicit grant now inherits the anon policy,
-   max(explicit, anon) — re-verify `canManage()`/tab-structure ops are STILL
-   strictly owner/admin-only regardless of this), full owner/editor/viewer
-   matrix, WS auth via the `hello` message (`e2c26bf`) for both authenticated
-   and anonymous connections, Origin validation (`303a435`) rejecting a
-   forged Origin.
+   cookie), the permissive anonymous-fallback behavior (a logged-in user with
+   no explicit grant inherits the anon policy, `max(explicit, anon)` —
+   re-verify `canManage()`/tab-structure ops are STILL strictly owner/
+   admin-only regardless of this), full owner/editor/viewer matrix, WS auth
+   via the `hello` message (not the connect URL) for both authenticated and
+   anonymous connections, Origin validation rejecting a forged Origin.
 2. **Formula engine.** All functions (`SUM`/`AVG`/`MIN`/`MAX`/`COUNT`/
    `COUNTA`/`ROUND`/`ABS`/`IF`/`CONCAT`), `$` locking, blank-cell arithmetic
    (`=A1+5` with blank `A1` → 5, not `NaN`, per the `arithNumber` fix),
-   copy/paste reference shifting (re-verify the clipboard-race fix,
-   `fbd7377` — copy/paste multiple times in a row, rapid succession, to
-   stress the timing this bug came from), structural insert/delete
+   copy/paste reference shifting (this was previously broken by an async
+   clipboard-write/read race — copy/paste multiple times in a row, rapid
+   succession, to stress that kind of timing), structural insert/delete
    reference shifting, `ACTIONGROUP`-aware reference shifting on structural
-   delete (only the dead action drops, not the whole button — `1cc4f4b`),
-   circular references (`#ERROR`, no hang), dependency recalculation across
-   local edits AND remote WS patches.
+   delete (only the dead action should drop, not the whole button), circular
+   references (`#ERROR`, no hang), dependency recalculation across local
+   edits AND remote WS patches.
 3. **`ACTIONGROUP`/`USERINFO`.** The consolidated one-dialog prompt (not
    per-field native prompts), any field name works (not just name/email),
    `name` is decoupled from account identity (seeded once, freely editable
@@ -428,12 +435,11 @@ cleanup, never spreadsheet id=13 — see Ground Rules above.*
 Re-verify what's already been built, then probe for anything new:
 
 **Re-verify (regression):**
-- JWT hello-based auth (`e2c26bf`) and Origin validation (`303a435`) both
-  still correctly reject forged/invalid credentials.
+- JWT hello-based auth and Origin validation both still correctly reject
+  forged/invalid credentials.
 - The full permission matrix (owner/edit/view/anonymous), especially the
-  permissive anon-fallback change (`0431c71`) — confirm it did NOT
-  accidentally loosen `canManage()` (tab-structure ops must stay strictly
-  owner/admin-only).
+  permissive anon-fallback behavior — confirm it did NOT accidentally loosen
+  `canManage()` (tab-structure ops must stay strictly owner/admin-only).
 - JWT expiry/tampering/forging (alg=none, signature tampering, expired-but-
   validly-signed) — re-run given the TTL is now 6 months, not 12h; a forged
   expired token is a much more attractive target now than when this was
