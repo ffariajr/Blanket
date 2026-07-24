@@ -6,6 +6,13 @@ using the template below. Do not fix inline while testing (except
 record for Fernando to triage. Order: append new entries at the bottom in
 discovery order; don't renumber existing ones.
 
+**If you're reading this file without having read `TESTING_PLAN.md` first,
+go read that first** — it has the full ground rules every tester must follow
+(never touch spreadsheet id=13, collision-resistant test-data naming,
+exact-ID-only cleanup, which real-browser technique to use and how, exact
+deploy/git commands) and the full scope this file's findings come from. This
+file is just the output; the plan is the instructions.
+
 Every entry must have gone through the same adversarial-verify step used
 throughout this project: a DIFFERENT agent than the one who found it attempts
 to independently reproduce it from scratch before `Verified` is set to `yes`.

@@ -15,6 +15,71 @@ should be root-caused and fixed this round, not just re-discovered and logged
 again. Everything else: record, don't fix, so Fernando can triage before
 deciding what blocks release.
 
+---
+
+## Start here — orientation for a fresh reader
+
+**Assume you (and every subagent you dispatch) have never seen this project
+before this moment.** This plan is written to be self-sufficient: everything
+you need to actually execute it is either inlined below or in a project doc
+this section points you to directly. Don't assume a dispatched subagent will
+automatically have read the project's saved memories
+(`/home/claude/.claude/projects/-home-claude-blanket/memory/`) before acting —
+the load-bearing content from both memory files that exist there
+(`browser-testing-workaround.md`, `concurrent_test_data_collisions.md`) is
+reproduced verbatim-in-substance inside the Ground Rules section below so
+nothing depends on a subagent independently pulling that in.
+
+**What Blanket actually is, in one paragraph:** a self-hosted, mobile-friendly
+spreadsheet web app, built for a church (live at
+`https://church.dogmanjr.net/blanket/`), as a lightweight alternative to
+Google Sheets for people who don't want to install an app or sign into a
+Google account. Anonymous access is possible per-spreadsheet at the owner's
+discretion (view-only or view+edit); authenticated accounts (admin-created
+only, no self-registration) own/manage spreadsheets and can grant other users
+access. Real-time collaborative editing is the headline feature. Every save
+is a new row in an append-only history table — nothing is ever overwritten or
+deleted except by an admin, and "current state" is always just the latest
+row.
+
+**How the pieces fit together:** a PHP REST API (Apache + mod_php,
+`/var/www/church/blanket` on this box) handles auth, spreadsheet/tab CRUD,
+sharing, and reads/writes the MySQL database (`blanket` schema, hosted on a
+*separate* machine, `db.dogmanjr.net` — not local to this box). A Python
+WebSocket server (`ws-server/`, deployed to `/var/www/church/blanket-ws`, run
+by systemd as service `blanket-ws`, bound to `127.0.0.1:8765` only, reached
+through an Apache reverse-proxy path `/blanket/ws/`) handles real-time
+collaboration: live edits, presence, debounced persistence back to the same
+MySQL history table. The frontend is plain/vanilla JavaScript (no framework,
+no build step — `assets/js/*.js`, ES modules loaded directly by the browser).
+Auth is JWT (HS256), shared secret between the PHP side and the WS server,
+carried in the WebSocket's first `hello` message (not the connect URL — see
+Section A item 1, this was a real fix this session).
+
+**Read these project docs, in this order, before doing anything else** (all
+paths relative to `/home/claude/blanket`):
+1. `README.md` — what the app does and its feature list, ~1 minute read.
+2. `MACHINE.md`, `REQUIREMENTS.md`, `ACCESS.md` — the hosting environment
+   (this Linux user's constraints, what needs root vs. doesn't, what access
+   this session actually has).
+3. `CELL_SCHEMA.md` — the canonical per-tab cell-data JSON shape (what a
+   formula cell, a merged cell, an `ACTIONGROUP`/`USERINFO` cell actually
+   look like on disk/wire — required reading before testing the formula
+   engine or `ACTIONGROUP` in Section A).
+4. `security-concerns.md` — the current security posture: what's already
+   fixed, what's a deliberately-accepted risk (don't re-flag these — see
+   Ground Rules below), what's still open.
+5. `db/schemas.md` — the live MySQL schema (tables, columns, indexes) —
+   needed for Section D's database-performance work especially.
+6. `deploy/README.md` — exactly how to deploy a change to either the PHP app
+   or the WS server, and the sharp edges that have bitten this project twice
+   already (see Ground Rules → Deploy mechanics below for the load-bearing
+   parts inlined directly).
+7. `TODO.md` — current open items; Section G below fixes the two bugs
+   already logged there.
+
+---
+
 ## Scale warning, read this before starting
 
 This is **not** a single afternoon's work and should not be run as one
@@ -31,48 +96,171 @@ time, per Fernando's own stated purpose.
 ## Ground rules (apply to every section, every agent)
 
 - **Never touch spreadsheet id=13** ("Test", owner id=15 `fvf`) or its
-  tabs/history/access. Every agent creates its own throwaway users/
-  spreadsheets.
-- **Naming: collision-resistant, not a fill-in-the-blank template.** Read the
-  `concurrent_test_data_collisions` project memory — two different classes of
-  test-data collision have actually happened this session (a broad `LIKE`
-  cleanup hitting a sibling's still-in-use rows, and multiple agents
-  independently completing an identical literal username template). Every
-  agent must generate its own random suffix (e.g. `openssl rand -hex 4`) for
-  its throwaway usernames/titles, not fill in a shared template the same
-  predictable way another concurrent agent might.
-- **Cleanup: exact ID only, never `LIKE`.** No exceptions, even for "my own"
-  prefix.
+  tabs/history/access — this is Fernando's real, live data, not a fixture.
+  **Repeat this to every dispatched subagent explicitly, every time** — don't
+  assume it's remembered from one dispatch to the next. Every agent creates
+  its own throwaway users/spreadsheets and deletes them when done (see
+  cleanup rule below).
+
+- **Naming: collision-resistant, not a fill-in-the-blank template.** Two
+  different classes of test-data collision have actually happened this
+  project already:
+  1. A broad `LIKE`-pattern cleanup (`DELETE ... WHERE username LIKE
+     'wftest_sharedprefix_%'`) hit a *sibling* agent's still-in-use rows
+     mid-run, because the pattern matched a shared root prefix instead of
+     that agent's own specific rows.
+  2. Multiple agents were given a fill-in-the-blank naming template and some
+     completed it identically (or one used the literal un-filled template
+     string) — a later agent's `INSERT` then hit a duplicate-key error, and
+     instead of picking a different name, it looked up and silently
+     *reused* the pre-existing row (which actually belonged to a different,
+     still-running agent), then deleted it during its own "cleanup" —
+     pulling it out from under the agent that actually owned it.
+
+  **The fix for both, every single time throwaway test data is created:**
+  generate your own unpredictable suffix yourself (e.g. run `openssl rand
+  -hex 4` and use that in the username/title), never fill in a shared
+  template the same predictable way a concurrently-running sibling agent
+  might. If an `INSERT` of throwaway test data ever hits a duplicate-key/
+  unique-constraint error, that is a hard signal to retry with a
+  *different* name — never look up and adopt/reuse the existing row, not
+  even read-only. A same-named row appearing during a concurrent test run
+  is never "mine from an earlier step" — parallel test agents share no
+  state with each other.
+
+- **Cleanup: exact ID only, never `LIKE`, no exceptions** — not even for a
+  pattern that looks like it should only match "my own" rows. Delete
+  `spreadsheet_history` rows for your own tab IDs, then your own tabs, then
+  `spreadsheet_access` rows for your own spreadsheet IDs, then your own
+  spreadsheets, then your own users — all by exact numeric ID, verified
+  (`SELECT ... WHERE id = <exact id>`) before and after.
+
 - **Real browser, not jsdom, wherever the finding could plausibly be a
-  rendering/layout/timing issue.** Read the `browser-testing-workaround`
-  project memory: a cached Chromium binary works on this box without root by
-  extracting 4 missing shared libs via `apt-get download` + `dpkg-deb -x`,
-  driven directly via `puppeteer-core` (NOT the `mcp__*__browser_*` MCP
-  tools, which spawn their own Chrome process and don't inherit a shell's
-  `LD_LIBRARY_PATH`). jsdom is fine for pure-logic checks (formula
-  evaluation, dependency graphs) where no real layout/timing/clipboard is
-  involved.
+  rendering/layout/timing issue.** A cached Chromium binary already exists
+  on this box at `/home/claude/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`
+  (and `chromium_headless_shell-1228`) but fails to launch with a
+  dynamic-linker error for four missing shared libraries. Installing them
+  system-wide needs root, which this session doesn't have — but
+  `apt-get download <pkg>` (fetches the `.deb` file to the current
+  directory only, does not install anything, needs no root) works fine.
+  Exact commands, run once per session/environment (cache the extracted
+  libs in a stable scratch dir and reuse):
+  ```bash
+  mkdir -p /tmp/chrome-libs && cd /tmp/chrome-libs
+  apt-get download libatk1.0-0t64 libatk-bridge2.0-0t64 libxdamage1 libatspi2.0-0t64
+  mkdir extracted
+  for f in *.deb; do dpkg-deb -x "$f" extracted; done
+  export LD_LIBRARY_PATH=/tmp/chrome-libs/extracted/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+  /home/claude/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome --version
+  ```
+  This launches a genuinely working Chrome — confirmed via real page
+  navigation, real computed `scrollHeight`/`clientHeight`, real dispatched
+  wheel/touch events, and (via `puppeteer-core`, installable locally with
+  `npm install puppeteer-core` — no root, and unlike the full `puppeteer`
+  package it does NOT try to download its own Chromium) real clipboard
+  read/write with genuine async timing. Point `puppeteer-core` at it like
+  this:
+  ```js
+  const puppeteer = require('puppeteer-core');
+  const browser = await puppeteer.launch({
+    executablePath: '/home/claude/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome',
+    headless: true,
+    args: ['--no-sandbox', '--disable-gpu'],
+    env: { ...process.env, LD_LIBRARY_PATH: '/tmp/chrome-libs/extracted/usr/lib/x86_64-linux-gnu' },
+  });
+  ```
+  **Do NOT use the `mcp__*__browser_*` / Playwright MCP tools for this** —
+  they spawn their own Chrome process with its own fixed environment, and
+  setting `LD_LIBRARY_PATH` in a Bash tool call does not propagate to that
+  separate process, so those tools fail with the same missing-library error
+  no matter what. Drive Chrome directly via Bash/CDP/`puppeteer-core`
+  instead. jsdom is fine (and simpler) for pure-logic checks with no real
+  layout/timing/clipboard involved (formula evaluation, dependency-graph
+  correctness) — reserve real Chrome for anything that could plausibly be a
+  rendering, layout, or timing-sensitive finding.
+
 - **Every finding recorded in `BUGS_FOUND.md`** using the template already in
-  that file — severity, area, precise reproduction, whether it was adversarially
-  re-verified by a second agent (do this for every finding, same pattern as
-  prior testing rounds in this project: a finder proposes, a different agent
-  tries to independently reproduce before it counts as confirmed).
-- **This app has changed substantially since the last full functional sweep**
-  — formula copy/paste clipboard race fix, `ACTIONGROUP` reference-deletion
-  handling, cookie-clearing-on-clear behavior, arrow-key cell traversal,
-  vertical scroll fix, WS auth moved to the `hello` message, Origin
-  validation, and the entire mobile bug batch (touch drag-select, topbar
-  layout, Share dialog, sheets-list overflow, Manage Tabs button size). Don't
-  assume anything not explicitly listed as "already re-verified" is still
-  correct — a full regression sweep is warranted, not spot-checks.
+  that file — severity, area, precise reproduction, whether it was
+  adversarially re-verified by a second agent. Concretely: whoever finds a
+  bug writes it up; a genuinely *different* agent (not the same one, not
+  told the first agent's conclusion, just given the reproduction steps)
+  attempts to independently reproduce it from scratch; only mark
+  `Verified: yes` once that second agent confirms it. If the second agent
+  can't reproduce it, log it anyway as `Verified: no — see detail` rather
+  than silently discarding it — Fernando should see it either way.
+
+- **This app has changed substantially since the last full functional
+  sweep** — formula copy/paste clipboard race fix, `ACTIONGROUP`
+  reference-deletion handling, cookie-clearing-on-clear behavior, arrow-key
+  cell traversal, vertical scroll fix, WS auth moved to the `hello` message,
+  Origin validation, and the entire mobile bug batch (touch drag-select,
+  topbar layout, Share dialog, sheets-list overflow, Manage Tabs button
+  size). Don't assume anything not explicitly listed as "already
+  re-verified" is still correct — a full regression sweep is warranted, not
+  spot-checks.
+
 - **Already known and deliberately accepted — do NOT re-flag as findings:**
-  no login rate-limiting (Fernando explicitly declined this); the `blanket`
-  MySQL user currently has `ALL PRIVILEGES` (already tracked, scheduled to be
-  narrowed as the literal next step after this testing passes).
+  no login rate-limiting (Fernando explicitly considered and declined this —
+  weighed a small MySQL table against PHP's System V shared-memory
+  primitives, decided against both); the `blanket` MySQL user currently has
+  `ALL PRIVILEGES` (already tracked in `TODO.md`, scheduled to be narrowed as
+  the literal next step after this testing passes — this is expected, not a
+  gap to discover and report).
+
+- **Deploy mechanics — exact commands, needed to verify any fix you make:**
+  - **PHP app** (frontend JS/CSS, `src/` PHP code): from `/home/claude/blanket`,
+    run `./install.sh --apply`. This syncs an allowlisted set of paths
+    (`.htaccess`, `index.html`, `index.php`, `assets/`, `src/`, `vendor/`) to
+    `/var/www/church/blanket` and stamps a cache-busting version into
+    `index.html`/`app.js`/`grid.js`/`ws.js`'s own `?v=` query strings. It
+    does NOT touch `ws-server/`, `db/`, `deploy/`, or dotfile secrets
+    (`.mysql.env`/`.app.env`, protected by an explicit rsync `P` filter rule
+    after those were once accidentally deleted from production by an
+    earlier, less careful version of this same script — see
+    `security-concerns.md` #7).
+  - **WS server** (`ws-server/*.py`): sync manually —
+    ```bash
+    rsync -a --no-owner --no-group --exclude venv/ --exclude __pycache__/ \
+      /home/claude/blanket/ws-server/ /var/www/church/blanket-ws/ws-server/
+    chgrp -R www-data /var/www/church/blanket-ws/ws-server
+    ```
+    **The `--no-owner --no-group` flags and the `chgrp -R www-data` afterward
+    are load-bearing, not optional** — a plain `rsync -a` preserves the
+    *source's* group (`claude`) instead of letting the destination inherit
+    `www-data` from its setgid parent, which has broken the running
+    `blanket-ws` systemd service (`User=www-data`) TWICE already with the
+    exact same `CHDIR` crash-loop, since `www-data` ends up with zero access
+    to a `claude`-group directory. If you change any `ws-server/*.py` file
+    and skip these flags, expect the service to crash-loop — check
+    `stat -c '%U:%G %a' /var/www/church/blanket-ws/ws-server` first if that
+    happens.
+  - **Critically: after any `ws-server/` change, the running `blanket-ws`
+    systemd service will NOT pick it up until it's restarted, and this
+    session has no `systemctl` access at all.** `sudo systemctl restart
+    blanket-ws` has to be run by Fernando himself. State this plainly
+    whenever a WS-server-side fix is made and awaiting deployment — don't
+    assume it's live just because the files were synced to disk.
+
+- **Git identity and push conventions.** No global `git config` is set for
+  this user, so every commit needs identity passed explicitly:
+  ```bash
+  git -c user.email=claude.ai@fernandofaria.email -c user.name=Claude commit -m "..."
+  ```
+  Always a **new commit**, never `--amend`. A real GitHub remote exists —
+  `git@github.com:ffariajr/Blanket.git` — and pushing to it (`git push
+  origin master`) is normal, expected practice for this project, not
+  something to hesitate over or ask permission for each time. Check
+  `git status` before committing and stage only your own changes if
+  anything else is unexpectedly present in the working tree (this has
+  happened before when multiple agents touch the repo around the same
+  time).
 
 ---
 
 ## Section A — Full functional regression sweep (web/desktop)
+
+*Reminder: throwaway test data only, your own random-suffix naming, exact-ID
+cleanup, never spreadsheet id=13 — see Ground Rules above.*
 
 Re-test the whole feature surface given how much has changed since the last
 full pass. Suggested breakdown (mirrors the dimension structure of the
@@ -138,6 +326,9 @@ commit messages; any deviation goes in `BUGS_FOUND.md`.
 
 ## Section B — Mobile regression + feature-parity audit
 
+*Reminder: throwaway test data only, your own random-suffix naming, exact-ID
+cleanup, never spreadsheet id=13 — see Ground Rules above.*
+
 **Part 1 — regression.** The 8 mobile bugs found and fixed this session
 (touch drag-select for cells and row/col headers, topbar title collapse,
 Share dialog overflow, sheets-list overflow, Manage Tabs arrow size, the
@@ -176,7 +367,13 @@ with touch alone? Specifically check:
   including the two bugs from Section G once fixed.
 
 **Part 3 — the WebKit/Safari gap (read this, it's a hard constraint, not
-optional to skip).** Every mobile test this session — this plan included —
+optional to skip).** **TL;DR for a skimming reader: real WebKit was already
+investigated directly and found infeasible on this box (missing shared-lib
+count an order of magnitude beyond Chromium's, with unresolved transitive
+dependencies) — don't re-attempt it expecting a different result, spend the
+time on the time-boxed attempt described below instead, and tell Fernando a
+real-iPhone check is a mandatory manual gate regardless of outcome.** Full
+detail: every mobile test this session — this plan included —
 uses real Chromium with Blink's mobile emulation. **No mobile testing so far
 has used a WebKit-based engine**, which is what actual iPhone/iOS users run
 (Android Chrome IS Blink, so Android coverage is more representative;
@@ -224,6 +421,9 @@ don't let a clean WebKitGTK pass (if achieved) read as "iOS verified."
 ---
 
 ## Section C — Security
+
+*Reminder: throwaway test data only, your own random-suffix naming, exact-ID
+cleanup, never spreadsheet id=13 — see Ground Rules above.*
 
 Re-verify what's already been built, then probe for anything new:
 
@@ -274,6 +474,9 @@ Re-verify what's already been built, then probe for anything new:
 ## Section D — Performance (genuinely untested ground — nothing here has
 been checked at all this entire project)
 
+*Reminder: throwaway test data only, your own random-suffix naming, exact-ID
+cleanup, never spreadsheet id=13 — see Ground Rules above.*
+
 - **Large spreadsheets.** Resize a tab well beyond the 6×20 default (try
   200+ rows, 50+ columns) and confirm: grid rendering stays responsive,
   scroll stays smooth, formula recalculation (especially a deep dependency
@@ -316,6 +519,9 @@ confirm there's no cliff at a size a real user could plausibly reach).
 
 ## Section E — WebSocket collaboration matrix
 
+*Reminder: throwaway test data only, your own random-suffix naming, exact-ID
+cleanup, never spreadsheet id=13 — see Ground Rules above.*
+
 This needs deliberate coverage of collaborator COUNT and PLATFORM MIX, not
 just "does WS work" (already covered in Section A):
 
@@ -351,6 +557,9 @@ just "does WS work" (already covered in Section A):
 
 ## Section F — Anything else relevant, beyond Fernando's explicit list
 
+*Reminder: throwaway test data only, your own random-suffix naming, exact-ID
+cleanup, never spreadsheet id=13 — see Ground Rules above.*
+
 Flagging these as scope additions, with why:
 
 - **Data integrity of the append-only history model at scale/under
@@ -375,6 +584,10 @@ Flagging these as scope additions, with why:
 ---
 
 ## Section G — Fix the two known pre-existing bugs (from `TODO.md`)
+
+*Reminder: throwaway test data only for verification, your own random-suffix
+naming, exact-ID cleanup, never spreadsheet id=13. Use the exact deploy
+commands and git identity/push conventions from Ground Rules above.*
 
 Unlike every other section, **actually root-cause and fix these**, don't
 just re-confirm and re-log them:
