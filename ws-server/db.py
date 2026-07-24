@@ -55,6 +55,20 @@ def fetch_spreadsheet(spreadsheet_id):
             return cur.fetchone()
 
 
+def fetch_user_by_username(username):
+    """Returns {id, username, display_name, is_admin, enabled} or None.
+    Mirrors src/Repositories/UserRepository::findByUsername() (minus the
+    columns nothing in ws-server needs, like password_hash/email)."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, username, display_name, is_admin, enabled
+                   FROM users WHERE username = %s AND deleted_at IS NULL""",
+                (username,),
+            )
+            return cur.fetchone()
+
+
 def fetch_access_level(spreadsheet_id, user_id):
     """Explicit access_level for this user on this spreadsheet, or None."""
     with _connect() as conn:

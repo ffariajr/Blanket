@@ -137,7 +137,9 @@ async def handle_connection(websocket):
         await websocket.close(code=1008, reason="First message must be 'hello'")
         return
 
-    identity = auth.resolve_identity(hello.get("token"), hello.get("name"))
+    identity = await asyncio.get_running_loop().run_in_executor(
+        None, auth.resolve_identity, hello.get("token"), hello.get("name")
+    )
     if identity.is_anonymous and not hello.get("name"):
         await websocket.close(code=1008, reason="Anonymous connections must supply a name")
         return
