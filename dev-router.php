@@ -6,14 +6,15 @@ declare(strict_types=1);
 // Apache + .htaccess do in production: an existing static file
 // (index.html, assets/*) is served as-is, "/" resolves to index.html,
 // internal paths (src/, bin/, vendor/, db/, ws-server/, dotfiles, and
-// .env/.sql/.md/.sh/.lock/.json/.log files) are blocked the same way
+// .env/.sql/.md/.sh/.lock/.json/.log/.bak/.backup/.old/.orig/.save/.swp/
+// .swo/.tmp/.temp/.txt/.dist/.out/.copy files) are blocked the same way
 // .htaccess blocks them, and everything else routes through index.php.
 // Keep the two lists below in sync with .htaccess if either changes.
 
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '/';
 
 $blockedDirs = ['src', 'bin', 'vendor', 'db', 'ws-server'];
-$blockedExtensions = ['env', 'sql', 'md', 'sh', 'lock', 'json', 'log'];
+$blockedExtensions = ['env', 'sql', 'md', 'sh', 'lock', 'json', 'log', 'bak', 'backup', 'old', 'orig', 'save', 'swp', 'swo', 'tmp', 'temp', 'txt', 'dist', 'out', 'copy'];
 $segments = array_values(array_filter(explode('/', $path)));
 
 if ($path === '/dev-router.php'
