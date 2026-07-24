@@ -1,5 +1,5 @@
 import { api, ApiError, setToken, getDisplayName, setDisplayName, getCurrentUser, isSessionValid, APP_BASE } from './api.js?v=__DEPLOY_VERSION__';
-import { Grid, FONT_FAMILIES, FONT_SIZES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, FORMAT_MIXED } from './grid.js?v=__DEPLOY_VERSION__';
+import { Grid, FONT_FAMILIES, FONT_SIZES, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, FORMAT_MIXED, displayableCellValue } from './grid.js?v=__DEPLOY_VERSION__';
 import { TabSocket } from './ws.js?v=__DEPLOY_VERSION__';
 
 const root = document.getElementById('app');
@@ -543,7 +543,7 @@ async function renderSheet(spreadsheetId, tabId) {
     onSelect: (ref) => {
       formulaRefLabel.textContent = ref || '';
       if (document.activeElement !== formulaInput) {
-        formulaInput.value = ref && grid.cells[ref] ? (grid.cells[ref].value || '') : '';
+        formulaInput.value = ref && grid.cells[ref] ? (displayableCellValue(grid.cells[ref].value) || '') : '';
       }
     },
   };
