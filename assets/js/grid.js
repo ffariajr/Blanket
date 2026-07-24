@@ -61,6 +61,10 @@ const DEFAULT_COL_WIDTH = 96;
 const DEFAULT_ROW_HEIGHT = 28;
 const MIN_COL_WIDTH = 32;
 const MIN_ROW_HEIGHT = 18;
+// How long a touch has to hold still before it's treated as "starting a
+// drag-select" rather than "starting a scroll" -- see _onTouchStart.
+const TOUCH_DRAG_ARM_MS = 350;
+const TOUCH_DRAG_ARM_PX = 10;
 // The row-header <col> (row numbers, leftmost) never had an explicit
 // width -- under table-layout:auto (before the resize-squeeze fix) that
 // was fine, content sized it. Under table-layout:fixed, a <col> with no
@@ -118,6 +122,8 @@ export class Grid {
     this.editingInput = null;
     this._dragging = false;
     this._headerDragging = null; // 'row'|'col'|null -- see _onRowHeaderMouseDown/_onColHeaderMouseDown
+    this._touchDragCandidate = null; // {kind, ref|index, x, y, armed} -- see _onTouchStart
+    this._touchDragTimer = null;
     this._headerAnchorRow = null; // anchor row/col for a whole-row/column selection -- see selectWholeRow/Column
     this._headerAnchorCol = null;
     this._resizing = null; // {kind: 'col'|'row', key, startPx, startSize, el}
@@ -143,6 +149,8 @@ export class Grid {
     // (this.table, this.selected, ...) at call time, not at bind time, so
     // none of them care that this.table gets replaced by later rebuilds.
     document.addEventListener('mouseup', () => this._onMouseUp());
+    document.addEventListener('touchend', () => this._onTouchEnd());
+    document.addEventListener('touchcancel', () => this._onTouchEnd());
     document.addEventListener('keydown', (e) => this._onKeyDown(e));
     document.addEventListener('paste', (e) => this._onPaste(e));
     document.addEventListener('copy', (e) => this._onCopy(e));
@@ -285,6 +293,7 @@ export class Grid {
       // multi-column selection the same way cell drag-select works --
       // see _onColHeaderMouseDown/_onMouseMoveDrag.
       th.addEventListener('mousedown', (e) => this._onColHeaderMouseDown(e, c));
+      th.addEventListener('touchstart', (e) => this._onColHeaderTouchStart(e, c), { passive: true });
       th.appendChild(this._colResizeHandle(letter, this._colElements[c]));
       headRow.appendChild(th);
       this._colHeaderElements.push(th);
@@ -316,6 +325,7 @@ export class Grid {
       rowHead.textContent = String(rowNum);
       rowHead.dataset.rowIndex = String(r);
       rowHead.addEventListener('mousedown', (e) => this._onRowHeaderMouseDown(e, r));
+      rowHead.addEventListener('touchstart', (e) => this._onRowHeaderTouchStart(e, r), { passive: true });
       this._rowHeaderElements.push(rowHead);
       rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
       // A <tr height> is only a floor in table layout -- content taller
@@ -371,6 +381,11 @@ export class Grid {
     table.addEventListener('mousedown', (e) => this._onMouseDown(e));
     table.addEventListener('mousemove', (e) => this._onMouseMoveDrag(e));
     table.addEventListener('dblclick', (e) => this._onCellDblClick(e));
+    // Touch counterpart of the mouse drag-select above -- see _onTouchStart's
+    // doc comment for why this needs a long-press arm rather than just
+    // mirroring mousedown/mousemove directly.
+    table.addEventListener('touchstart', (e) => this._onTouchStart(e), { passive: true });
+    table.addEventListener('touchmove', (e) => this._onTouchMove(e), { passive: false });
 
     this._renderAll();
 
@@ -1092,6 +1107,127 @@ export class Grid {
     e.preventDefault();
     this._headerDragging = 'col';
     this.selectWholeColumn(colIndex, e.shiftKey);
+  }
+
+  /**
+   * Touch counterpart of mousedown+mousemove drag-select (cell range, and
+   * row/col header multi-select below). Can't just mirror mousedown/
+   * mousemove directly: a finger dragging across the grid is ALSO how you
+   * scroll it, and there's no way to tell "starting a range-select" apart
+   * from "starting a scroll" from touchstart position/movement alone --
+   * both begin as a finger moving across cells. Real spreadsheet apps
+   * (Google Sheets/Excel mobile) resolve this the same way: a plain swipe
+   * scrolls; a finger held still for a beat first, THEN dragged, means
+   * "I'm selecting a range." Implemented here as a short arm-timer: touchstart
+   * records where/what was touched but does nothing yet (no preventDefault,
+   * so a normal scroll starts immediately if that's what the gesture turns
+   * out to be); if the timer fires before real movement happens, NOW commit
+   * to drag-select (same _select/selectWholeRow/selectWholeColumn calls the
+   * mouse path uses) and start blocking the browser's scroll for the rest of
+   * this gesture; if movement arrives first, it's a scroll -- cancel the
+   * timer and never engage for this gesture. A plain tap (no movement, timer
+   * never even relevant) is untouched by any of this -- it already works via
+   * the browser's own tap-to-mousedown/mouseup/click synthesis, which this
+   * code doesn't interfere with since touchstart never calls preventDefault.
+   */
+  _onTouchStart(e) {
+    if (e.touches.length !== 1) return; // ignore pinch-zoom/multi-touch entirely
+    if (e.target.closest('.col-resize-handle') || e.target.closest('.row-resize-handle')) return;
+    const td = e.target.closest('td');
+    if (!td) return;
+    const touch = e.touches[0];
+    this._armTouchDragCandidate({ kind: 'cell', ref: td.dataset.ref }, touch);
+  }
+
+  _onRowHeaderTouchStart(e, rowIndex) {
+    if (e.touches.length !== 1) return;
+    if (e.target.closest('.row-resize-handle')) return;
+    this._armTouchDragCandidate({ kind: 'row', index: rowIndex }, e.touches[0]);
+  }
+
+  _onColHeaderTouchStart(e, colIndex) {
+    if (e.touches.length !== 1) return;
+    if (e.target.closest('.col-resize-handle')) return;
+    this._armTouchDragCandidate({ kind: 'col', index: colIndex }, e.touches[0]);
+  }
+
+  _armTouchDragCandidate(candidate, touch) {
+    if (this._touchDragTimer) clearTimeout(this._touchDragTimer);
+    this._touchDragCandidate = { ...candidate, x: touch.clientX, y: touch.clientY, armed: false };
+    this._touchDragTimer = setTimeout(() => {
+      const c = this._touchDragCandidate;
+      if (!c) return;
+      c.armed = true;
+      if (c.kind === 'cell') {
+        this._dragging = true;
+        this._select(c.ref, false);
+      } else if (c.kind === 'row') {
+        this._headerDragging = 'row';
+        this.selectWholeRow(c.index, false);
+      } else if (c.kind === 'col') {
+        this._headerDragging = 'col';
+        this.selectWholeColumn(c.index, false);
+      }
+    }, TOUCH_DRAG_ARM_MS);
+  }
+
+  _onTouchMove(e) {
+    const c = this._touchDragCandidate;
+    if (!c) return;
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    if (!c.armed) {
+      const moved = Math.hypot(touch.clientX - c.x, touch.clientY - c.y);
+      if (moved > TOUCH_DRAG_ARM_PX) {
+        // Moved before the arm-timer fired -- a scroll, not a range-select.
+        // Don't preventDefault; let the browser scroll normally, and stop
+        // tracking so a later pause-then-move in this same gesture can't
+        // retroactively arm drag-select mid-scroll.
+        clearTimeout(this._touchDragTimer);
+        this._touchDragCandidate = null;
+      }
+      return;
+    }
+    // Armed: a deliberate drag-select, not a scroll -- block the browser's
+    // native scroll for the rest of this gesture. touchmove's own e.target
+    // stays pinned to whatever touchstart hit (unlike mousemove, which
+    // tracks the live element under the pointer), so elementFromPoint is
+    // the only way to find what's actually under the finger right now.
+    e.preventDefault();
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    if (!el) return;
+    if (c.kind === 'row') {
+      const th = el.closest('tbody th');
+      if (th && th.dataset.rowIndex !== undefined) this.selectWholeRow(Number(th.dataset.rowIndex), true);
+    } else if (c.kind === 'col') {
+      const th = el.closest('thead th');
+      if (th && th.dataset.colIndex !== undefined) this.selectWholeColumn(Number(th.dataset.colIndex), true);
+    } else {
+      const td = el.closest('td');
+      if (td && td.dataset.ref !== this.selected) {
+        this.selected = td.dataset.ref;
+        this._highlightRange(this.anchor, this.selected);
+      }
+    }
+  }
+
+  _onTouchEnd() {
+    if (this._touchDragTimer) {
+      clearTimeout(this._touchDragTimer);
+      this._touchDragTimer = null;
+    }
+    const c = this._touchDragCandidate;
+    this._touchDragCandidate = null;
+    if (!c || !c.armed) return;
+    if (this._headerDragging) {
+      this._headerDragging = null;
+      this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
+      return;
+    }
+    if (this._dragging) {
+      this._dragging = false;
+      this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
+    }
   }
 
   /**
