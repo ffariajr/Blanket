@@ -324,7 +324,15 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 /* Duplicate/"Make a copy" button sits beside the link, same row -- matches
    the .access-list li layout rather than introducing a new pattern. */
 .sheet-list li { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); }
-.sheet-list a { flex: 1; }
+/* min-width:0 -- without it, a flex item won't shrink below its own
+   unwrapped content width, so a title with no spaces to wrap at (one long
+   unbroken token) forced the whole row (and the Duplicate/"Make a copy"
+   button next to it, and the whole page) into horizontal overflow instead
+   of wrapping. overflow-wrap/word-break:break-word preserves the existing
+   multi-line-wrap-at-spaces behavior for normal titles unchanged, while
+   also allowing a mid-word break specifically for the unbreakable-token
+   case that was overflowing. */
+.sheet-list a { flex: 1; min-width: 0; overflow-wrap: break-word; word-break: break-word; }
 
 .history-list li, .access-list li {
   display: flex;
