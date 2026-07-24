@@ -3,6 +3,7 @@
 import jwt
 
 import config
+import db
 
 ALGORITHM = "HS256"
 
@@ -35,13 +36,31 @@ def verify(token):
 
 def resolve_identity(token, anonymous_name):
     """Mirrors Blanket\\Auth\\Authenticator: valid token -> that user,
-    otherwise the anonymous sentinel (id 0) with the client-supplied name."""
+    otherwise the anonymous sentinel (id 0) with the client-supplied name.
+
+    Re-fetches the account by username on every call, mirroring
+    AuthController::renew()'s live re-check -- a token's embedded claims
+    are a snapshot from issuance time and must not be trusted for
+    enabled/is_admin once an admin has since disabled the account or
+    revoked its admin flag. A disabled/deleted/missing account resolves
+    to anonymous, same as a missing/invalid/expired token, and the
+    freshly-fetched is_admin (never the stale claim) is what every
+    downstream access-level decision sees.
+
+    Hits the DB, so (like access.resolve()) callers on the asyncio event
+    loop must run this via run_in_executor rather than call it directly.
+    """
     claims = verify(token)
     if claims is None:
         return Identity.anonymous(anonymous_name or "Anonymous")
+
+    user = db.fetch_user_by_username(claims["username"])
+    if user is None or not user["enabled"]:
+        return Identity.anonymous(anonymous_name or "Anonymous")
+
     return Identity(
-        user_id=int(claims["sub"]),
-        username=claims["username"],
-        display_name=claims["display_name"],
-        is_admin=bool(claims["is_admin"]),
+        user_id=int(user["id"]),
+        username=user["username"],
+        display_name=user["display_name"],
+        is_admin=bool(user["is_admin"]),
     )

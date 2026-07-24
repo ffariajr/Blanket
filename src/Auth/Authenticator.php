@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Blanket\Auth;
 
 use Blanket\Http\Request;
+use Blanket\Repositories\UserRepository;
 
 /**
  * Resolves the acting user for a request. Returns the anonymous sentinel
@@ -27,11 +28,24 @@ final class Authenticator
             return CurrentUser::anonymous();
         }
 
+        // Re-fetch the account by username on every request, mirroring
+        // AuthController::renew() -- a token's embedded claims are a
+        // snapshot from issuance time and must not be trusted for
+        // enabled/is_admin once an admin has since disabled the account
+        // or revoked its admin flag. A disabled/deleted/missing account
+        // resolves to anonymous, same as a missing/invalid/expired token,
+        // and the freshly-fetched is_admin (never the stale claim) is
+        // what every downstream authorization decision sees.
+        $user = (new UserRepository())->findByUsername((string) $claims['username']);
+        if ($user === null || !$user['enabled']) {
+            return CurrentUser::anonymous();
+        }
+
         return new CurrentUser(
-            id: (int) $claims['sub'],
-            username: (string) $claims['username'],
-            displayName: (string) $claims['display_name'],
-            isAdmin: (bool) $claims['is_admin'],
+            id: $user['id'],
+            username: $user['username'],
+            displayName: $user['display_name'],
+            isAdmin: $user['is_admin'],
         );
     }
 }
