@@ -252,7 +252,7 @@ async function renderSheetsList() {
         li.appendChild(el('button', {
           class: 'btn btn-small',
           onclick: async () => {
-            const shareToo = window.confirm("Also duplicate this spreadsheet's sharing settings?");
+            const shareToo = await showConfirm("Also duplicate this spreadsheet's sharing settings?", { confirmLabel: 'Yes', cancelLabel: 'No' });
             await api.duplicateSpreadsheet(s.id, shareToo);
             await refresh();
           },
@@ -535,7 +535,7 @@ async function renderSheet(spreadsheetId, tabId) {
     },
   });
   const formulaHelpBtn = el('button', {
-    class: 'btn btn-secondary btn-icon', type: 'button', title: 'Formula help',
+    class: 'btn btn-secondary btn-icon', type: 'button', title: 'Formula help', 'aria-label': 'Formula help',
     onclick: () => showFormulaHelp(),
   }, '?');
   const formulaBar = {
@@ -612,7 +612,7 @@ async function renderSheet(spreadsheetId, tabId) {
     }, [t.name, dotsEl]));
   });
 
-  const tabMenuBtn = el('button', { class: 'btn btn-secondary btn-icon', title: 'Tab options' }, '⋮');
+  const tabMenuBtn = el('button', { class: 'btn btn-secondary btn-icon', title: 'Tab options', 'aria-label': 'Tab options' }, '⋮');
   tabMenuBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     showTabMenu(tabMenuBtn, {
@@ -651,9 +651,9 @@ async function renderSheet(spreadsheetId, tabId) {
     ...FONT_SIZES.map((size) => el('option', { value: String(size) }, String(size))),
   ]);
   const toolbar = el('div', { class: 'toolbar' }, [
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
-    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Bold', 'aria-label': 'Bold', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('bold') }, 'B'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Italic', 'aria-label': 'Italic', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('italic') }, 'I'),
+    el('button', { class: 'btn btn-secondary btn-icon', title: 'Underline', 'aria-label': 'Underline', disabled: readOnly || null, onclick: () => grid.toggleFormatOnSelection('underline') }, 'U'),
     el('input', {
       class: 'btn-color', type: 'color', title: 'Text color', disabled: readOnly || null,
       onchange: (e) => grid.applyFormatToSelection({ color: e.target.value }),
@@ -855,6 +855,82 @@ async function renderSheet(spreadsheetId, tabId) {
   };
 }
 
+/**
+ * Standard dismissible-dialog keyboard affordances: moves focus into the
+ * dialog immediately (to `focusEl`, or the dialog's first focusable
+ * control/tabindex host if omitted) and closes it on Escape -- the same
+ * `.focus()`-on-open pattern showRenameSpreadsheet/showRenameTab/the
+ * USERINFO prompt already use, extended with Escape-to-close since almost
+ * none of the dialogs support it (see BUGS_FOUND.md [006]). The document
+ * keydown listener is torn down automatically once the dialog leaves the
+ * DOM, however that happens (Close button, backdrop click, this same
+ * Escape handler, or the dialog's own onsubmit success path), so opening
+ * a dialog never leaks a permanent listener. NOT used for the required
+ * Welcome name-prompt, which deliberately must not close via Escape or a
+ * backdrop click.
+ */
+function wireModalA11y(dialog, focusEl, onEscape) {
+  // :not([disabled]) matters in practice -- e.g. Manage Tabs' first control
+  // in DOM order is the "Move left" button on whichever tab is currently
+  // first (always disabled, since there's nothing to its left), so the
+  // naive selector would silently .focus() a disabled button (a no-op)
+  // and leave focus behind on the trigger element, defeating the whole
+  // point of this helper.
+  const target = focusEl
+    || dialog.querySelector('input:not([disabled]), button:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([disabled])');
+  if (target) target.focus();
+  function onKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      if (onEscape) onEscape();
+      else dialog.remove();
+    }
+  }
+  document.addEventListener('keydown', onKeyDown);
+  const observer = new MutationObserver(() => {
+    if (!document.body.contains(dialog)) {
+      document.removeEventListener('keydown', onKeyDown);
+      observer.disconnect();
+    }
+  });
+  observer.observe(document.body, { childList: true });
+}
+
+/**
+ * App-styled replacement for the native window.confirm(), matching the
+ * rest of the app's dialog design language instead of an unstyled browser
+ * prompt (see BUGS_FOUND.md [033]) -- same Promise<boolean> shape a
+ * window.confirm() call site already expects, so it's a drop-in swap.
+ * Escape and a backdrop click both resolve false, same as dismissing a
+ * native confirm dialog.
+ */
+function showConfirm(message, { confirmLabel = 'OK', cancelLabel = 'Cancel' } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      dialog.remove();
+      resolve(result);
+    }
+    const confirmBtn = el('button', { class: 'btn', type: 'button', onclick: () => finish(true) }, confirmLabel);
+    const dialog = el('div', {
+      class: 'modal',
+      onclick: (e) => { if (e.target === dialog) finish(false); },
+    }, [
+      el('div', { class: 'modal-content' }, [
+        el('p', {}, message),
+        el('div', { class: 'inline-form' }, [
+          confirmBtn,
+          el('button', { class: 'btn btn-secondary', type: 'button', onclick: () => finish(false) }, cancelLabel),
+        ]),
+      ]),
+    ]);
+    document.body.appendChild(dialog);
+    wireModalA11y(dialog, confirmBtn, () => finish(false));
+  });
+}
+
 async function showHistory(tabId, grid) {
   const { history } = await api.listHistory(tabId, 50);
   const list = el('ul', { class: 'history-list' });
@@ -882,6 +958,7 @@ async function showHistory(tabId, grid) {
     ]),
   ]);
   document.body.appendChild(dialog);
+  wireModalA11y(dialog);
 }
 
 const ACCESS_LEVELS = [
@@ -974,7 +1051,12 @@ function showFormulaHelp() {
     // one for now.
     onclick: (e) => { if (e.target === dialog) dialog.remove(); },
   }, [
-    el('div', { class: 'modal-content modal-content-wide' }, [
+    // tabindex="-1": this dialog has no Close button and no other
+    // focusable control (see the onclick comment above) for wireModalA11y
+    // below to move focus to, so the content wrapper itself is the
+    // keyboard-focus target -- otherwise focus would stay behind the
+    // modal on whatever triggered it (the toolbar's "?" button).
+    el('div', { class: 'modal-content modal-content-wide', tabindex: '-1' }, [
       // Mobile-only: this dialog has no Close button by design (see the
       // onclick comment above), but on a touch screen there's no hover
       // affordance hinting that the darkened margin around the box is
@@ -1008,6 +1090,7 @@ function showFormulaHelp() {
     ]),
   ]);
   document.body.appendChild(dialog);
+  wireModalA11y(dialog);
 }
 
 /**
@@ -1145,6 +1228,7 @@ async function showShare(spreadsheetId, shareUrl) {
   ]);
   document.body.appendChild(dialog);
   await refresh();
+  wireModalA11y(dialog);
 }
 
 // Shared floating-menu positioning/dismiss logic for both context menus
@@ -1302,11 +1386,18 @@ function showTabMenu(anchorEl, { tabId, tabName, grid, canManage, onRenamed }) {
   function close() {
     menu.remove();
     document.removeEventListener('click', onDocClick);
+    document.removeEventListener('keydown', onKeyDown);
   }
   function onDocClick(e) {
     if (!menu.contains(e.target) && e.target !== anchorEl) close();
   }
+  function onKeyDown(e) {
+    if (e.key === 'Escape') { e.stopPropagation(); close(); }
+  }
   setTimeout(() => document.addEventListener('click', onDocClick), 0);
+  document.addEventListener('keydown', onKeyDown);
+  const firstItem = menu.querySelector('button, input');
+  if (firstItem) firstItem.focus();
 }
 
 function showRenameSpreadsheet(spreadsheet, onDone) {
@@ -1406,7 +1497,7 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
         el('span', { class: t.id === currentTabId ? 'manage-tabs-current' : '' }, t.name),
         el('span', { class: 'manage-tabs-controls' }, [
           el('button', {
-            class: 'btn btn-small btn-secondary btn-icon', title: 'Move left',
+            class: 'btn btn-small btn-secondary btn-icon', title: 'Move left', 'aria-label': 'Move tab left',
             disabled: !prev || null,
             onclick: async () => {
               if (!prev) return;
@@ -1425,7 +1516,7 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             },
           }, '←'),
           el('button', {
-            class: 'btn btn-small btn-secondary btn-icon', title: 'Move right',
+            class: 'btn btn-small btn-secondary btn-icon', title: 'Move right', 'aria-label': 'Move tab right',
             disabled: !next || null,
             onclick: async () => {
               if (!next) return;
@@ -1496,6 +1587,7 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
   ]);
   document.body.appendChild(dialog);
   await refresh();
+  wireModalA11y(dialog);
 }
 
 function exportCsv(tabId) {

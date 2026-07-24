@@ -194,7 +194,36 @@ export class Grid {
     // own, same division of responsibility as mergeSelection()'s {ok,error}
     // return -- grid.js does the data operation, app.js does the UI).
     this.container.addEventListener('contextmenu', (e) => this._onContextMenu(e));
+    // Keyboard-only entry point: every <td> is tabIndex=-1 (see _build())
+    // and _onKeyDown early-returns whenever this.selected is unset, so
+    // without this the grid was completely unreachable via Tab alone --
+    // arrow-key traversal (_moveSelection) only ever moves an *existing*
+    // selection, it can't create the first one. Making the scroll
+    // container itself a real, explicit tab stop and establishing a
+    // selection the first time it receives focus (if nothing is already
+    // selected -- e.g. a prior mouse/touch click) gives keyboard-only
+    // users a way in, after which the existing arrow-key handling takes
+    // over normally.
+    this.container.tabIndex = 0;
+    this.container.addEventListener('focus', () => this._onContainerFocus());
     this._build();
+  }
+
+  _onContainerFocus() {
+    if (this.selected) return;
+    const ref = this._firstSelectableRef();
+    if (ref) this._select(ref, false);
+  }
+
+  /** First (top-left, reading order) cell not covered by another cell's merge -- normally just "A1". */
+  _firstSelectableRef() {
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const ref = colLetter(c) + (r + 1);
+        if (!this._isCovered(ref)) return ref;
+      }
+    }
+    return null;
   }
 
   // --- Remote state / patches --------------------------------------
