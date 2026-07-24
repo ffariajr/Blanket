@@ -17,13 +17,21 @@
 
 ## Known bugs (found during mobile retest, pre-existing, not mobile/touch-specific)
 
-- **Formula-bar's cell-reference label goes stale after a drag-select.**
-  Reproduces identically via mouse, not something the mobile touch-select
-  work introduced. Not yet investigated.
+- ~~**Formula-bar's cell-reference label goes stale after a drag-select.**~~
+  Fixed, commit `6b8bb14`: `_onMouseMoveDrag` now calls
+  `this.onSelectionChange(this.selected)` right after `_highlightRange`, so
+  the label tracks the pointer continuously during a plain-mouse
+  drag-select instead of only updating on the next unrelated selection
+  change. Verified live with real Chromium + puppeteer-core (confirmed the
+  bug reproduced on the pre-fix code, confirmed fixed post-fix); deployed.
 
-- **Enter in the formula bar commits the value, then the same keydown
-  re-opens the cell for inline editing.** An event-ordering/blur-timing
-  quirk in `_onKeyDown`. Not yet investigated.
+- ~~**Enter in the formula bar commits the value, then the same keydown
+  re-opens the cell for inline editing.**~~ Fixed, commit `6b8bb14`: added
+  `e.stopPropagation()` in the formula input's Enter/Escape `onkeydown`
+  branches, since `blur()`'s synchronous focus change was otherwise letting
+  the same keydown bubble to grid.js's document-level `_onKeyDown` handler
+  and reopen inline editing. Verified live with real Chromium +
+  puppeteer-core; deployed.
 
 ## Step 2 - Hardening & Cleanup
 
