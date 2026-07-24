@@ -104,7 +104,20 @@ class TabSession:
         self.dirty = True
         self.last_editor = client
 
-        await self._broadcast_others(ws, {
+        # Broadcast to EVERYONE, including the sender -- not
+        # _broadcast_others(). An accepted edit here is now authoritative
+        # (merged into self.data, the single source of truth this session
+        # writes from), and on a same-cell race the sender's own optimistic
+        # local render can already have been overwritten by an intervening
+        # remote patch from another client's earlier (now-superseded) edit
+        # by the time this one is accepted. Without echoing back to the
+        # sender, nothing ever tells that client its own edit in fact won --
+        # it's left permanently displaying that stale peer value instead of
+        # its own now-authoritative one, with no self-correction (see
+        # BUGS_FOUND.md [001]). grid.js's applyRemote() is idempotent
+        # against a client re-receiving its own already-applied patch, so
+        # this is safe for the common (non-racing) case too.
+        await self._broadcast_all({
             "type": "new_edit",
             "from": self._sender_info(client),
             "payload": payload,
