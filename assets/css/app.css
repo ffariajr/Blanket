@@ -704,7 +704,12 @@ table.grid th { position: relative; }
    on the input lets it actually shrink/wrap instead of refusing to go
    below its unshrunk content width. */
 .share-section .inline-form { margin-top: var(--space-2); margin-bottom: 0; flex-wrap: wrap; }
-.share-section .inline-form input { min-width: 0; }
+/* min-width:0 (no floor) let this shrink to ~4-5 visible characters on
+   mobile instead of ever actually wrapping -- same min-width-blocks-wrap
+   mechanism as .topbar-title (line 236), same fix: a real floor forces
+   the row to wrap once the other items (select + button) don't fit
+   alongside it anymore, instead of squeezing the input first. */
+.share-section .inline-form input { min-width: 120px; flex: 1 1 auto; }
 
 .share-link-row { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .share-link-input {
