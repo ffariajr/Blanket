@@ -2,13 +2,28 @@
 
 ## Testing
 
-- **Full exhaustive testing of the mobile version**, in subagents (same
-  pattern as the earlier desktop-feature testing workflows) — hasn't been
-  done yet. A real (headless) Chromium can actually be driven on this box
-  now — see the `browser-testing-workaround` memory — so this can use real
-  browser testing with a mobile viewport/user-agent set via Chrome's own
-  CLI flags, not just jsdom. Still worth a manual spot-check by Fernando on
-  an actual phone for anything genuinely touch/gesture-specific.
+- ~~**Full exhaustive testing of the mobile version**~~ — done. Found 8
+  bugs (touch drag-select non-functional for cells and row/col headers,
+  topbar title collapse/overlap, Share dialog buttons pushed off-screen,
+  sheets-list long-title overflow, Manage Tabs arrow size, `.btn-small`/
+  formula-help notes); all fixed (commits `b50d2fb`..`146a08e`), re-tested
+  with a second full mobile exhaustive-testing pass, all 8 confirmed
+  genuinely fixed with no regressions. One follow-up regression from the
+  Share dialog fix itself (input over-shrinking) found by the retest and
+  fixed separately (`8e864aa`). Still worth a manual spot-check by
+  Fernando on a real phone for anything genuinely touch/gesture-specific
+  that headless Chromium can't fully simulate (e.g. real on-screen-keyboard
+  obscuring behavior).
+
+## Known bugs (found during mobile retest, pre-existing, not mobile/touch-specific)
+
+- **Formula-bar's cell-reference label goes stale after a drag-select.**
+  Reproduces identically via mouse, not something the mobile touch-select
+  work introduced. Not yet investigated.
+
+- **Enter in the formula bar commits the value, then the same keydown
+  re-opens the cell for inline editing.** An event-ordering/blur-timing
+  quirk in `_onKeyDown`. Not yet investigated.
 
 ## Step 2 - Hardening & Cleanup
 
