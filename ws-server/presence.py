@@ -10,9 +10,15 @@ another tab, they should still appear"). No locking needed on the registry
 dicts below: every mutation here happens synchronously with no `await`
 between a check and the corresponding write, so nothing can interleave
 mid-operation on asyncio's single-threaded event loop (same reasoning
-TabSession's own dict already relies on for its lock-free paths).
+TabSession's own dict already relies on for its lock-free paths). The
+broadcast() *network fan-out* is a separate concern from the dict
+mutations and IS guarded by a lock (see `_broadcast_lock`), since multiple
+in-flight `await ws.send(...)` calls from separate broadcast() invocations
+could otherwise interleave and deliver an earlier, now-stale snapshot to a
+client after a later, correct one.
 """
 
+import asyncio
 import itertools
 import json
 import logging
@@ -69,6 +75,16 @@ class SpreadsheetPresence:
     def __init__(self, spreadsheet_id):
         self.spreadsheet_id = spreadsheet_id
         self.viewers = {}  # websocket -> Viewer
+        # Serializes broadcast() calls against each other (only the send
+        # fan-out below, not the registry mutations above, which stay
+        # synchronous/lock-free per the module docstring). Without this,
+        # two broadcast() invocations triggered by near-simultaneous events
+        # (e.g. two viewers disconnecting at nearly the same instant) could
+        # have their `await ws.send(...)` calls interleave, letting an
+        # earlier (now-stale) roster snapshot finish delivering to a client
+        # AFTER a later, correct one -- leaving that client stuck on a
+        # stale roster with no self-correction.
+        self._broadcast_lock = asyncio.Lock()
 
     @classmethod
     def get_or_create(cls, spreadsheet_id):
@@ -109,7 +125,15 @@ class SpreadsheetPresence:
         if viewer is None or viewer.active == active:
             return
         viewer.active = active
-        viewer.last_active_at = time.time()
+        # Only stamp `last_active_at` on the activating (False->True)
+        # transition -- it means "last time this viewer was confirmed
+        # active", per the Viewer class comment above. Re-stamping it on
+        # the deactivating transition too would give the client's
+        # IDLE_GRACE_MS grace-period fallback (viewerIsActive() in app.js)
+        # a fresh "now" to count from right as the viewer goes idle,
+        # doubling real-world idle-detection latency for other viewers.
+        if active:
+            viewer.last_active_at = time.time()
         await self.broadcast()
 
     async def set_selection(self, ws, selection):
@@ -120,12 +144,17 @@ class SpreadsheetPresence:
         await self.broadcast()
 
     async def broadcast(self):
-        message = json.dumps({
-            "type": "presence",
-            "viewers": [v.to_dict() for v in self.viewers.values()],
-        })
-        for ws in list(self.viewers.keys()):
-            try:
-                await ws.send(message)
-            except Exception:
-                logger.exception("presence broadcast failed, dropping viewer")
+        # Hold the lock across both the snapshot and the send fan-out so
+        # concurrent broadcast() calls can never have their sends
+        # interleave -- each broadcast fully delivers (in the order it was
+        # invoked) before the next one's snapshot is even taken.
+        async with self._broadcast_lock:
+            message = json.dumps({
+                "type": "presence",
+                "viewers": [v.to_dict() for v in self.viewers.values()],
+            })
+            for ws in list(self.viewers.keys()):
+                try:
+                    await ws.send(message)
+                except Exception:
+                    logger.exception("presence broadcast failed, dropping viewer")
