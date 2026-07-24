@@ -960,6 +960,13 @@ function showFormulaHelp() {
     onclick: (e) => { if (e.target === dialog) dialog.remove(); },
   }, [
     el('div', { class: 'modal-content modal-content-wide' }, [
+      // Mobile-only: this dialog has no Close button by design (see the
+      // onclick comment above), but on a touch screen there's no hover
+      // affordance hinting that the darkened margin around the box is
+      // tappable -- unlike desktop, where a visible cursor/backdrop makes
+      // "click outside" a familiar pattern. Hidden on desktop via CSS
+      // since it's not needed there.
+      el('p', { class: 'modal-close-hint' }, 'Tap outside this box to close'),
       el('h2', {}, 'Formulas'),
       el('p', { class: 'muted' }, 'Start a cell with = to enter a formula. Basic arithmetic (+ - * /) and comparisons (= <> < > <= >=) work directly on cell references and numbers, e.g. =A1+B1*2.'),
       el('p', { class: 'muted' }, [
@@ -1384,7 +1391,7 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
         el('span', { class: t.id === currentTabId ? 'manage-tabs-current' : '' }, t.name),
         el('span', { class: 'manage-tabs-controls' }, [
           el('button', {
-            class: 'btn btn-small btn-secondary', title: 'Move left',
+            class: 'btn btn-small btn-secondary btn-icon', title: 'Move left',
             disabled: !prev || null,
             onclick: async () => {
               if (!prev) return;
@@ -1403,7 +1410,7 @@ async function showManageTabs(spreadsheetId, currentTabId, onChanged) {
             },
           }, '←'),
           el('button', {
-            class: 'btn btn-small btn-secondary', title: 'Move right',
+            class: 'btn btn-small btn-secondary btn-icon', title: 'Move right',
             disabled: !next || null,
             onclick: async () => {
               if (!next) return;

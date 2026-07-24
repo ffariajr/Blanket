@@ -739,10 +739,25 @@ table.grid th { position: relative; }
   font-size: var(--font-size-sm);
 }
 
+/* Hidden by default (desktop): click-outside-to-close is a familiar
+   pattern there. Must come before the mobile media query below --
+   equal-specificity rules resolve by source order regardless of which
+   one is inside a matching @media block, so this base rule has to be
+   first or it would always win and the mobile override below would
+   never take effect. */
+.modal-close-hint { display: none; margin: 0; font-size: var(--font-size-xs); color: var(--color-text-muted); text-align: center; }
+
 /* Mobile: bigger tap targets, stacked toolbar. */
 @media (max-width: 767px) {
   .page { padding: var(--space-2) var(--space-3) var(--space-4); }
+  /* Deliberately overrides .btn-small's own 1.9rem too (same specificity,
+     wins by appearing later in the stylesheet) -- reviewed and confirmed
+     intentional, not an oversight: the whole point of this rule is
+     uniformly bigger tap targets on mobile, and a "small" button is
+     exactly the kind of target most likely to be mis-tapped at finger
+     size if left at its smaller desktop height. Not changing this. */
   .btn, .btn-color { height: 2.5rem; }
   .topbar h1 { font-size: var(--font-size-lg); }
   .modal-content { padding: var(--space-4); }
+  .modal-close-hint { display: block; }
 }
