@@ -200,7 +200,20 @@ export class Grid {
           if (('merge' in value) || (this.cells[ref] && this.cells[ref].merge)) structural = true;
           this.cells[ref] = { ...(this.cells[ref] || {}), ...value };
         }
-        if (!structural) this._renderCell(ref);
+        // A remote patch touching a cell the local user is actively,
+        // not-yet-committed editing must not blow away their open
+        // <input class="cell-input"> (see BUGS_FOUND.md [016] -- the old
+        // unconditional _renderCell() below did `el.innerHTML = ''`,
+        // destroying the focused input, which fired a native blur that
+        // force-committed the interrupted partial text over the remote
+        // edit). this.cells above is still updated with the remote value,
+        // so it's correct once editing ends -- via _commitEdit()'s own
+        // _renderCell() call on blur/Enter (which then also overwrites with
+        // whatever the user was actively typing, same last-write-wins
+        // semantics as any other concurrent edit), or via Escape's explicit
+        // _renderCell() call, which will correctly show this remote value.
+        const isBeingEdited = this.editingInput && this.editingInput.ref === ref;
+        if (!structural && !isBeingEdited) this._renderCell(ref);
       }
     }
     if (patch.columnWidths) {
@@ -1469,20 +1482,45 @@ export class Grid {
   // Unknown (paste from outside the app, or the Clipboard API round-trip
   // couldn't confirm it's our own last copy) means formulas paste
   // literally, unchanged -- the pre-existing behavior, not a regression.
+  // Writes every pasted cell directly (not via setCellValue() per cell) and
+  // rebuilds the ACTIONGROUP-watch map and dependents graph exactly ONCE
+  // for the whole paste, not once per pasted cell -- see BUGS_FOUND.md
+  // [019]/[020]: going through setCellValue() per cell made every single
+  // pasted cell independently pay for a full O(total sheet cells)
+  // _buildActionGroupWatches() scan and another full O(total sheet cells)
+  // _buildDependents() scan (via _recalcDependents()), turning an
+  // O(pasted cells) paste into O(pasted cells x total sheet cells) -- a
+  // multi-second full-tab freeze on a real-world-scale sheet. Mirrors the
+  // batching _clearSelection() already does for its own range (build
+  // watches once before the loop, call _recalcDependents() once after).
   _applyTsvAtSelection(text, origin) {
-    if (!text) return;
+    if (!text || this.readOnly) return;
     const startCell = parseRef(this.selected);
     const deltaCols = origin ? startCell.col - origin.col : 0;
     const deltaRows = origin ? startCell.row - origin.row : 0;
     const lines = text.replace(/\r/g, '').split('\n').filter((l, i, a) => !(i === a.length - 1 && l === ''));
+    const writes = [];
     lines.forEach((line, r) => {
       line.split('\t').forEach((value, c) => {
         const ref = colLetter(startCell.col + c) + (startCell.row + r + 1);
         if (value === '' || this._isCovered(ref)) return;
         const toWrite = origin && isFormula(value) ? shiftFormulaReferences(value, deltaCols, deltaRows) : value;
-        this.setCellValue(ref, toWrite);
+        writes.push([ref, toWrite]);
       });
     });
+    if (!writes.length) return;
+    const watches = this._buildActionGroupWatches();
+    const changedRefs = [];
+    for (const [ref, value] of writes) {
+      const prev = this.cells[ref] || {};
+      this.cells[ref] = { ...prev, value };
+      this.onChange({ cells: { [ref]: { value } } });
+      const watch = watches.get(ref);
+      if (watch) setUserInfoField(watch.infoType, value);
+      this._renderCell(ref);
+      changedRefs.push(ref);
+    }
+    this._recalcDependents(changedRefs);
   }
 
   // Ctrl/Cmd+C path (see _onKeyDown): writes to the real OS clipboard via
