@@ -45,9 +45,15 @@ final class TabRepository
 
     public function nextPosition(int $spreadsheetId): int
     {
+        // Must match reorder()'s own "active tabs only" view of the world
+        // (and find()/listForSpreadsheet()'s deleted_at IS NULL filter) --
+        // otherwise a soft-deleted tab's leftover position still counts
+        // toward MAX(), a newly created tab lands above
+        // activeTabCount-1, and reorder()'s clamp to [0, activeTabCount-1]
+        // makes that position permanently unreachable as a move target.
         $stmt = Db::connection()->prepare(
             'SELECT COALESCE(MAX(position), -1) + 1 AS next_position
-             FROM tabs WHERE spreadsheet_id = :spreadsheet_id'
+             FROM tabs WHERE spreadsheet_id = :spreadsheet_id AND deleted_at IS NULL'
         );
         $stmt->execute(['spreadsheet_id' => $spreadsheetId]);
         return (int) $stmt->fetch()['next_position'];

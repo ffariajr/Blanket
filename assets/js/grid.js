@@ -12,6 +12,27 @@ import {
 import { getUserInfoField, setUserInfoField, deleteUserInfoField } from './api.js?v=__DEPLOY_VERSION__';
 
 /**
+ * A cell's `value` is normally a string (literal or "=formula") -- every
+ * write path the app itself uses (setCellValue et al.) only ever puts a
+ * string there. Pre-existing data written directly to the DB, bypassing
+ * the app entirely, can hold a `value` of any JSON type though. Numbers/
+ * booleans stringify to something sensible and match how every other
+ * malformed shape on a tab already degrades gracefully (blank, or a
+ * plain string coercion) -- but a plain object (or array) has no sensible
+ * string form: naive `String(anObject)`/textContent-assignment always
+ * produces the useless literal "[object Object]", which is a real value
+ * a user could see and be confused by, not a graceful degrade. Guard for
+ * that one shape specifically and fall back to blank, same as the other
+ * malformed shapes already do via this file's own falsy/undefined-
+ * property fallbacks elsewhere.
+ */
+export function displayableCellValue(raw) {
+  if (raw === null || raw === undefined) return '';
+  const t = typeof raw;
+  return t === 'string' || t === 'number' || t === 'boolean' ? raw : '';
+}
+
+/**
  * Executors for ACTIONGROUP's action types, keyed by action.type -- the
  * runtime counterpart to formulas.js's ACTION_ARG_PARSERS (parsing lives
  * there, execution lives here since it needs Grid's cookie/DOM access).
@@ -702,7 +723,7 @@ export class Grid {
     if (actionGroup) {
       this._renderActionGroupCell(ref, inner, actionGroup, cell);
     } else {
-      inner.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : raw;
+      inner.textContent = isFormula(raw) ? String(evaluateFormula(raw, (r) => this._resolveRef(r))) : displayableCellValue(raw);
     }
 
     const fmt = (cell && cell.format) || {};
