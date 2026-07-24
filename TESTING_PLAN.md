@@ -130,6 +130,34 @@ wrong place to cut scope to save time, per Fernando's own stated purpose.
   is never "mine from an earlier step" — parallel test agents share no
   state with each other.
 
+- **Creating a test user account.** There is no self-registration — accounts
+  only come from `bin/create-admin.php` or a direct DB insert. Two options:
+  1. **The interactive script, driven non-interactively via piped stdin.**
+     Prompts appear in this exact order: username, email, display name,
+     password, then `Grant admin? [y/N]`. From `/home/claude/blanket`:
+     ```bash
+     printf 'wftest_%s\nwftest_%s@example.com\nWF Test\nSomeStrongPassw0rd!\nN\n' \
+       "$(openssl rand -hex 4)" "$(openssl rand -hex 4)" \
+       | php bin/create-admin.php
+     ```
+     (The script calls `system('stty -echo')`/`system('stty echo')` around the
+     password prompt for terminal-hiding purposes; with piped, non-tty stdin
+     this just prints a harmless `stty: ... Inappropriate ioctl for device`
+     warning to stderr and continues — the account is still created
+     correctly. It prints `Created user id <id>.` on success.)
+  2. **Direct SQL insert**, when you need to skip the CLI or insert many
+     users at once — must use a real bcrypt hash matching
+     `src/Auth/Password.php`'s `password_hash($plain, PASSWORD_DEFAULT)`,
+     e.g. generate it with `php -r "echo password_hash('SomeStrongPassw0rd!', PASSWORD_DEFAULT), PHP_EOL;"`,
+     then:
+     ```sql
+     INSERT INTO users (username, email, password_hash, display_name, is_admin, enabled)
+     VALUES ('wftest_<random>', 'wftest_<random>@example.com', '<bcrypt hash from above>', 'WF Test', 0, 1);
+     ```
+     Log in normally afterward via the app's login form with the plaintext
+     password you hashed. Either way, the resulting user is throwaway test
+     data — delete it by exact ID during cleanup like everything else.
+
 - **Cleanup: exact ID only, never `LIKE`, no exceptions** — not even for a
   pattern that looks like it should only match "my own" rows. Delete
   `spreadsheet_history` rows for your own tab IDs, then your own tabs, then
@@ -180,6 +208,22 @@ wrong place to cut scope to save time, per Fernando's own stated purpose.
   layout/timing/clipboard involved (formula evaluation, dependency-graph
   correctness) — reserve real Chrome for anything that could plausibly be a
   rendering, layout, or timing-sensitive finding.
+
+- **A blocking "Welcome" name-prompt modal will stop any fresh browser
+  automation cold.** `boot()` in `assets/js/app.js` awaits
+  `promptForNameIfNeeded()` before it ever calls `route()` — so a brand-new
+  browser context/profile (no `name` cookie set yet) hits a modal dialog
+  asking for a display name before the login form, the spreadsheet grid, or
+  anything else in the app becomes reachable. Any automation script must
+  handle this first: either dismiss/fill it programmatically (find the
+  modal's `<input>` and its `Continue` submit button and interact with them
+  like any other element), or pre-seed it away entirely by setting the
+  `blanket_name` cookie (path matching the app's base path, e.g.
+  `/blanket/`) and/or the `blanket_display_name` `localStorage` key
+  (`getDisplayName()`/`setDisplayName()` in `assets/js/api.js` — the cookie
+  is checked first, `localStorage` is the fallback) before the page's own
+  `boot()` runs. Don't mistake a script that hangs or times out waiting for
+  the login form for an app bug — check for this modal first.
 
 - **Every finding recorded in `BUGS_FOUND.md`** using the template already in
   that file — severity, area, precise reproduction, whether it was

@@ -2,7 +2,7 @@
 
 Generated from the live `blanket` database on `db.dogmanjr.net`, reflecting
 migrations `0001_initial_schema.sql` through
-`0005_drop_tab_attribution_columns.sql`. Source of truth is
+`0007_spreadsheet_guid_not_null_unique.sql`. Source of truth is
 `db/migrations/`; this file is a readable snapshot, not authoritative — if
 it ever disagrees with the migrations, the migrations win.
 
@@ -48,6 +48,7 @@ without touching `deleted_at`'s archive semantics).
 | Field      | Type            | Null | Key | Default           | Extra                                           |
 +------------+-----------------+------+-----+-------------------+------------------------------------------------+
 | id         | bigint unsigned | NO   | PRI | NULL              | auto_increment                                  |
+| guid       | char(36)        | NO   | UNI | NULL              |                                                  |
 | owner_id   | bigint unsigned | NO   | MUL | NULL              |                                                  |
 | title      | varchar(255)    | NO   |     | NULL              |                                                  |
 | created_at | timestamp       | NO   |     | CURRENT_TIMESTAMP | DEFAULT_GENERATED                               |
@@ -61,6 +62,7 @@ without touching `deleted_at`'s archive semantics).
 | Constraint                 | Columns   | References | On Delete |
 +----------------------------+-----------+------------+-----------+
 | PRIMARY KEY                 | id        | -          | -         |
+| UNIQUE uq_spreadsheets_guid | guid      | -          | -         |
 | KEY idx_spreadsheets_owner  | owner_id  | -          | -         |
 | FK fk_spreadsheets_owner    | owner_id  | users(id)  | RESTRICT  |
 +----------------------------+-----------+------------+-----------+
@@ -69,6 +71,12 @@ without touching `deleted_at`'s archive semantics).
 Soft-deleted via `deleted_at` (hides from the owner). Only a real admin
 action ever issues an actual `DELETE`, which cascades to `tabs` (and
 transitively to `spreadsheet_access` and `spreadsheet_history`).
+
+`guid` (added by `0006_add_spreadsheet_guid.sql`, made `NOT NULL UNIQUE` by
+`0007_spreadsheet_guid_not_null_unique.sql`) is a randomly-generated (not
+MySQL `UUID()`, which is v1/time+MAC-based and more guessable) value used
+for shareable URLs (`church.dogmanjr.net/blanket/#/s/<guid>`) — the URL
+someone is viewing IS the share link, no separate "get share link" step.
 
 ## tabs
 

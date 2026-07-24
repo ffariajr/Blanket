@@ -36,6 +36,10 @@ Notes on the host this project (and future projects run by Claude Code as the
   externally-facing listener and TLS terminator.
 - Deployment paths under `/var/www/*` are `www-data`-owned, not writable by
   `claude`. Deploys are done by `fvf`/root, not directly by Claude Code.
+  **Superseded:** `/var/www` was later `chown -R claude:www-data`'d and
+  `install.sh --apply` was built to deploy directly as `claude` (allowlist
+  rsync, protects `.mysql.env`/`.app.env`). Claude Code deploys PHP changes
+  directly now — see `deploy/README.md`, not this section.
 
 ## Database
 
@@ -77,3 +81,9 @@ One Apache instance in front of everything. PHP runs in-process via
 mod_php. Any Python service runs as a standalone process on localhost with
 Apache reverse-proxying it and owning TLS. Deploys and system config
 changes are done by `fvf`/root, not by `claude`.
+**Superseded for Blanket specifically:** PHP deploys (`install.sh --apply`)
+and the `ws-server` rsync deploy are now done directly by `claude` — see
+`deploy/README.md`. `fvf`/root are still needed for anything genuinely
+requiring root (Apache vhost/systemd unit edits, `systemctl restart`), but
+routine deploys of already-configured services are no longer in that
+bucket.

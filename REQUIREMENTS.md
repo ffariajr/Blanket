@@ -25,6 +25,16 @@ See `MACHINE.md` for the environment this is based on.
 
 ## Deployment (needs `fvf`/root — Claude Code cannot do this directly)
 
+**Superseded:** this whole section describes the original plan before
+`/var/www` was `chown -R claude:www-data`'d and `install.sh --apply` was
+built. Claude Code now deploys PHP changes directly (`./install.sh
+--apply` from the repo root) and the `ws-server` via a manual `rsync`
+(see `deploy/README.md` for the exact commands) — routine deploys no
+longer need `fvf`/root. `fvf`/root are still needed for genuinely
+root-only actions (Apache vhost edits, systemd unit changes, `systemctl
+restart blanket-ws`), which are called out individually below where they
+still apply.
+
 - Copy PHP app files into `/var/www/church/blanket/` (already exists,
   `www-data`-owned, empty).
 - Enable `mod_proxy_wstunnel` (`a2enmod proxy_wstunnel` + reload) so Apache

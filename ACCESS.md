@@ -16,6 +16,15 @@ each item is for.
 
 ## Write
 
+**Superseded:** this entire section (through "Not needed" below) describes
+the original access request before `/var/www` was `chown -R
+claude:www-data`'d and `install.sh --apply` was built. `claude` can now
+write `/var/www/church/blanket/` and `/var/www/church/blanket-ws/`
+directly — see `deploy/README.md` for the actual deploy commands in use.
+The items below are kept for history; treat anything not called out as
+still-root-only (Apache vhost edits, systemd unit changes, `systemctl`
+itself) as accurate, and everything else as outdated.
+
 Expect most of this to be denied per your note — flagging what deployment
 normally touches so you know what to do by hand:
 
