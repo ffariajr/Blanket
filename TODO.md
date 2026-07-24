@@ -186,3 +186,131 @@ exploit — see security-concerns.md for full detail on each.
   still requiring a Section A/B re-test of anything selection- or
   merge-related, but a meaningfully smaller and lower-risk slice than full
   row+column virtualization.
+
+  ---
+
+  ### Addendum: Claude-Code-specific re-assessment (contrarian re-read, same
+  scope, same commit as the original writeup above)
+
+  The "1-2+ weeks" / "few days" framing above reads as generic human-developer
+  calendar time. Fernando asked for a second, adversarial pass specifically
+  addressing whether that unit even applies given how this project has
+  actually been worked all session: parallel Claude Code subagents across
+  isolated git worktrees, real-Chromium/puppeteer-core verification (not
+  mocked), independent adversarial re-verification catching real bugs before
+  merge (e.g. the `a56f5b6` admission-race fix, caught by a second agent
+  re-checking `dca21fe`'s mitigation), and full sweeps completing in hours,
+  not days — concretely, this exact repo's own commit timestamps show
+  `a494153` (start of TESTING_PLAN.md) at 06:56 through `f9a9feb` ([023]'s
+  fix landing) at 16:05 the same day: a from-scratch testing plan, a full
+  Section A-G regression sweep across auth/formulas/ACTIONGROUP/collab/
+  structural-ops/grid-UI/mobile with independent verification, 32 bugs fixed
+  and merged from 9 parallel worktrees (`b941fb4`..`20fc1a6`, all 9 merges
+  landing within a 29-minute window), a WS presence race mitigated and then
+  hardened after an independent-agent-caught bug, and a full repository/query
+  refactor (owned/shared split + new UI) — all in under 9.5 hours of wall
+  clock, in one day. Re-read `assets/js/grid.js` in full (all 2182 lines, not
+  just the original writeup's summary) to check the estimate against that
+  demonstrated mode of working, independently, before answering.
+
+  **Independent read of grid.js confirms the coupling claims above are
+  accurate, if anything slightly understated.** Every subsystem the original
+  writeup lists really does reach into live `<td>` state directly:
+  `_cellElements` (a flat ref->td Map built once per `_build()`, `_cellEl()`
+  silently no-ops off it everywhere), `_highlightRange()` (DOM classList
+  scan+toggle, not selected-refs-as-data), `app.js`'s `renderRemoteSelections()`
+  (calls `grid._cellEl(ref)` from *outside* grid.js entirely, wired back in
+  only via the `onRebuild` hook — confirmed at `assets/js/app.js:493-544,659`),
+  merge/coverage (`_computeCoverage`/`_isCovered`/`_originOf`, colSpan/rowSpan
+  baked into DOM structure), every input path's `e.target.closest('td')` or
+  `document.elementFromPoint()` hit-testing (`_onMouseDown`,
+  `_onMouseMoveDrag`, `_onCellDblClick`, `_onContextMenu`, `_onTouchStart`,
+  `_onTouchMove`), resize handles, and keyboard traversal (`_moveSelection`).
+  One thing worth adding to the original list: `_build()` today is the single
+  entry point for BOTH "the document's structural state changed" (merge,
+  remote structural patch, insert/delete row/col) AND "render every cell,"
+  with no existing concept of "recompute the visible window" as something
+  separate from either. Virtualizing has to introduce that third concept from
+  scratch, not just adapt the existing two — a real, currently-nonexistent
+  abstraction, not a variant of `_build()`.
+
+  **What's genuinely sequential vs. parallelizable, and why this is a WORSE
+  fit for the worktree-fan-out pattern than the 32-bug round was.** The core
+  windowing/mount-unmount abstraction (tracking which refs are currently
+  mounted, a scroll-driven recompute of the visible window, incremental
+  mount/unmount, a stable hook other code can subscribe to for "a ref just
+  (un)mounted" replacing `onRebuild`) has to land first and be API-stable
+  before any of the ~8 call-site adaptations can even be written against it,
+  let alone verified — genuinely serial, no way around it regardless of agent
+  count. But the follow-on work is NOT like the 32-bug round's fan-out,
+  where each bug lived in a different file/function with near-zero overlap
+  (`presence.py`, `TabController.php`, `formulas.js`, distinct `grid.js`
+  methods, dialog code, CSS) and could be handed to 9 isolated worktrees with
+  almost no merge friction. Here, most of the ~8 subsystems requiring rework
+  — selection highlighting, drag hit-testing, keyboard traversal, presence
+  overlay reapplication, merge-boundary guarantees — all live inside or
+  directly call the SAME small cluster of already-interdependent methods
+  (`_select`/`_highlightRange`/`_onMouseDown`/`_onMouseMoveDrag`/
+  `_onTouchMove`/`_moveSelection`, plus `app.js`'s `renderRemoteSelections`).
+  Splitting that cluster across parallel worktrees would mean 8 agents
+  editing overlapping regions of the same ~300 lines simultaneously — an
+  integration/merge-conflict cost that would likely burn more wall clock than
+  it saves. The honest parallelization win here is smaller than the mandate's
+  framing implies: realistically one agent, working through the adaptations
+  sequentially against the now-stable foundation API, with tight
+  real-browser verification per subsystem as it goes — not an 8-way fan-out.
+  (Copy/paste range ops are the one piece that genuinely is
+  already-independent and separable, per the original writeup — that one
+  could go to its own worktree/pass with little risk.)
+
+  **What's wall-clock-bottlenecked regardless of agent speed.** Two things,
+  neither compressible by throwing more Claude Code at them: (1) the
+  touch-gesture code has real, deliberately-chosen timers baked into its own
+  logic (`TOUCH_DRAG_ARM_MS` = 350ms, `TOUCH_LONG_PRESS_MENU_MS` = 550ms) that
+  any real-device verification has to actually wait out per scenario, not
+  something an LLM can think its way past; (2) TESTING_PLAN.md's own Section
+  A (7 major dimensions: auth, formula engine, ACTIONGROUP/USERINFO, realtime
+  collab, structural ops, grid UI, deployment hardening) and Section B (full
+  mobile regression + a feature-parity re-audit of every Section A item via
+  touch) are both explicitly called for after a change this invasive — real
+  page loads, real scroll/touch/frame-rate measurement (the kind [021]/[024]
+  themselves used: 120 rAF-driven scroll steps, 5 fresh Chromium launches per
+  condition, real touchscreen event sequences), and, per this project's own
+  now-established practice, an independent second-agent adversarial
+  reverification pass on top of the first (as was actually done for [021],
+  [022], [023], [024], and the 32-bug round). This is the same class of work
+  that took this project's own original Section A-G sweep about 3h45m of wall
+  clock (`a494153` 06:56 to `c686472`/`60a3962` ~10:39, the same day) even
+  with real parallel testing agents already in play — a comparably-scoped
+  re-test after virtualization should be expected to cost a similar order of
+  magnitude, not zero, no matter how fast the code itself gets written.
+
+  **Revised estimate.** Full 2D row+column virtualization, executed the way
+  this project actually works (foundation-first, sequential adaptation
+  against it, then a genuinely real-browser-bound regression pass): roughly
+  **2-3 focused Claude-Code sessions, on the order of 8-20 hours of total
+  wall clock**, not 1-2 calendar weeks — but also not something that
+  compresses to "an afternoon" just because an LLM writes the code fast,
+  because (a) the foundation-then-adapt structure is genuinely serial and
+  (b) the required regression re-test has a real wall-clock floor this
+  project has already empirically measured at several hours for a
+  comparably-scoped sweep. The row-only partial mitigation compresses further
+  than "a few days" suggests, plausibly to **one focused session, well under
+  a full day of wall clock** — it removes the single hardest item (cross-
+  window hit-testing) entirely, leaving a materially smaller, still-serial-
+  but-short foundation step plus a narrower regression slice (selection/
+  merge-related scenarios, not the full A/B sweep).
+
+  **Verdict: the original estimate is directionally right about relative
+  risk and scope (full virtualization is genuinely much bigger and riskier
+  than row-only; both writeups' architectural claims independently check
+  out against the full 2182-line file) but the "1-2+ weeks" / "few days"
+  UNITS are calendar-time framing that doesn't transfer to this project's
+  demonstrated Claude-Code-native mode of work.** Read as wall clock, both
+  numbers are meaningfully too pessimistic on time — but not for the naive
+  reason ("Claude Code writes code fast, so parallelize harder"); the real
+  correction is that this particular change parallelizes WORSE than the
+  32-bug round did (shared, already-entangled code, not disjoint files), and
+  the actual floor is a mix of one unavoidably-serial foundation step and a
+  real-browser regression-test wall-clock cost this project has already
+  measured directly, not a raw code-authoring speed limit.
