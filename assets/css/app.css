@@ -336,6 +336,12 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   font-size: var(--font-size-sm);
 }
 .history-list li:last-child, .access-list li:last-child { border-bottom: none; }
+/* min-width:0 + wrapping so a long "name (username) -- level" line wraps
+   instead of pushing Revoke/the row's other button off the edge of a
+   narrow modal (same overflow-instead-of-wrap issue as the Share form
+   above -- .access-list li's own flex row otherwise lets this span refuse
+   to shrink below its full unwrapped width). */
+.access-list li > span:first-child { min-width: 0; white-space: normal; word-break: break-word; }
 
 .tab-nav {
   display: flex;
@@ -679,7 +685,18 @@ table.grid th { position: relative; }
 .share-section { padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-border); }
 .share-section:last-of-type { border-bottom: none; padding-bottom: 0; }
 .share-section select { margin-top: var(--space-2); }
-.share-section .inline-form { margin-top: var(--space-2); margin-bottom: 0; }
+/* flex-wrap:wrap -- the global .inline-form is a single non-wrapping row
+   (fine for its other uses, e.g. the 2-element create-spreadsheet form),
+   but this one has three items (username input + access-level select +
+   Share button) that don't all fit at mobile widths. .modal-content's own
+   overflow:auto silently let that overflow become invisible horizontal
+   scroll instead -- Share (and Revoke on any already-listed access row,
+   pushed by the same modal-wide overflow) ended up completely
+   unreachable off-screen with no visible scroll affordance. min-width:0
+   on the input lets it actually shrink/wrap instead of refusing to go
+   below its unshrunk content width. */
+.share-section .inline-form { margin-top: var(--space-2); margin-bottom: 0; flex-wrap: wrap; }
+.share-section .inline-form input { min-width: 0; }
 
 .share-link-row { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .share-link-input {
