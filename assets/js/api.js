@@ -195,7 +195,8 @@ export const api = {
   login: (username, password) => request('POST', '/login', { username, password }),
   renewSession: () => request('POST', '/session/renew'),
 
-  listSpreadsheets: () => request('GET', '/spreadsheets'),
+  listSpreadsheets: (titleContains) =>
+    request('GET', titleContains ? `/spreadsheets?title_contains=${encodeURIComponent(titleContains)}` : '/spreadsheets'),
   createSpreadsheet: (title) => request('POST', '/spreadsheets', { title }),
   getSpreadsheet: (id) => request('GET', `/spreadsheets/${id}`),
   getSpreadsheetByGuid: (guid) => request('GET', `/spreadsheets/guid/${encodeURIComponent(guid)}`),
@@ -227,7 +228,31 @@ export const api = {
 
   importCsv: (tabId, csv, editorName) =>
     request('POST', `/tabs/${tabId}/import-csv`, { csv, editor_name: editorName }),
-  exportCsvUrl: (tabId) => `${API_BASE}/tabs/${tabId}/export-csv`,
+  /**
+   * Fetches the tab's CSV as an authenticated Blob (not a bare URL to
+   * navigate to -- see exportCsv() in app.js for why: a plain
+   * `window.location.href` navigation is a raw browser GET with no custom
+   * headers, so it can't carry the Authorization bearer token, and putting
+   * the JWT in the URL instead is exactly what this project has
+   * deliberately moved away from elsewhere, since Apache access logs would
+   * capture it). Uses the same Authorization-header mechanism as
+   * request() above, but bypasses request()'s JSON-only body parsing since
+   * the response here is `text/csv`, not JSON.
+   */
+  exportCsv: async (tabId) => {
+    const token = getToken();
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const res = await fetch(`${API_BASE}/tabs/${tabId}/export-csv`, { headers });
+    if (!res.ok) {
+      const isJson = (res.headers.get('content-type') || '').includes('application/json');
+      const data = isJson ? await res.json().catch(() => null) : null;
+      throw new ApiError(res.status, data);
+    }
+    const disposition = res.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="([^"]*)"/);
+    const filename = match ? match[1] : `tab-${tabId}.csv`;
+    return { blob: await res.blob(), filename };
+  },
 
   lookupUser: (username) => request('GET', `/users/lookup?username=${encodeURIComponent(username)}`),
 };
