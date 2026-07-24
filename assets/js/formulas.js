@@ -146,6 +146,14 @@ export function parseActionGroup(formula) {
  * @returns {number|string} the computed value, or "#ERROR" on failure.
  */
 export function evaluateFormula(formula, resolveRef) {
+  // '=#REF!' is the literal Excel-parity sentinel produced by
+  // shiftFormulaReferences()/shiftReferencesForStructuralChange() when a
+  // reference is invalidated -- it's not a parseable expression ('#' isn't
+  // a token the tokenizer knows about), so it must be special-cased here
+  // before tokenize() gets a chance to throw and fall into the generic
+  // catch-all below, which would otherwise indistinguishably downgrade it
+  // to the same "#ERROR" shown for any other malformed formula.
+  if (formula === '=#REF!') return '#REF!';
   try {
     const tokens = tokenize(formula.slice(1));
     const parser = new Parser(tokens, resolveRef);
@@ -409,7 +417,11 @@ function applyScalarFn(fn, args) {
       return Math.abs(toNumber(args[0]));
     case 'IF':
       if (args.length < 2) return '#ERROR';
-      return toNumber(args[0]) !== 0 ? args[1] : (args.length > 2 ? args[2] : '');
+      // arithNumber(), not toNumber(): a blank condition cell must be
+      // falsy, matching the same blank-as-0 convention +/-/*// already use
+      // (toNumber('') is NaN, and NaN !== 0 is always true, which made a
+      // blank condition always take the truthy branch).
+      return arithNumber(args[0]) !== 0 ? args[1] : (args.length > 2 ? args[2] : '');
     case 'CONCAT':
     case 'CONCATENATE':
       return args.map(toDisplayString).join('');
@@ -447,6 +459,14 @@ function toNumber(v) {
 // result as NaN -- toNumber() itself is left untouched since range functions
 // rely on it to filter out blanks via isNaN rather than counting them as 0.
 function arithNumber(v) {
+  // A circular-reference sentinel (grid.js's _resolveRef() cycle detection
+  // returns the literal string '#ERROR') must poison the whole expression
+  // and surface as '#ERROR', not silently coerce via toNumber()/parseFloat
+  // into NaN -- NaN + 1 renders as the literal text "NaN", not an error
+  // indicator. Throwing here is caught by evaluateFormula()'s catch-all,
+  // routing it to the same '#ERROR' path a bare circular self-reference
+  // (with no arithmetic) already correctly takes.
+  if (v === '#ERROR') throw new Error('#ERROR');
   if (v === undefined || v === null || v === '') return 0;
   return toNumber(v);
 }
