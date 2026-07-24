@@ -609,11 +609,24 @@ table.grid td.underline { text-decoration: underline; }
 
 /* Column/row resize drag handles -- thin invisible strips on the trailing
    edge of each header cell, widened visually only on hover so they don't
-   clutter a 30-column header by default. */
+   clutter a 30-column header by default.
+   These used to be centered ON the boundary line (right/bottom: -3px,
+   width/height: 6px), straddling half into the next header cell's own
+   box. That half was never actually hit-testable: table.grid thead th /
+   tbody th are `position: sticky` with explicit, non-auto z-index values
+   (own stacking contexts), and sibling header cells share the same
+   z-index, so ties break by DOM order -- the next column/row's entire
+   stacking context (its whole box, not just its content) paints over
+   anything from the previous header cell that overflows into its
+   rect, regardless of this handle's own z-index. Keeping the strip
+   flush with (not straddling) the trailing edge -- right/bottom: 0
+   instead of -3px -- keeps the whole hit area inside the current header
+   cell's own box, where it's reliably on top, while still visually
+   ending exactly on the boundary line. */
 table.grid th { position: relative; }
 .col-resize-handle {
   position: absolute;
-  top: 0; right: -3px; bottom: 0;
+  top: 0; right: 0; bottom: 0;
   width: 6px;
   cursor: col-resize;
   z-index: 4;
@@ -621,7 +634,7 @@ table.grid th { position: relative; }
 .col-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
 .row-resize-handle {
   position: absolute;
-  left: 0; right: 0; bottom: -3px;
+  left: 0; right: 0; bottom: 0;
   height: 6px;
   cursor: row-resize;
   z-index: 4;
@@ -765,4 +778,17 @@ table.grid th { position: relative; }
   .topbar h1 { font-size: var(--font-size-lg); }
   .modal-content { padding: var(--space-4); }
   .modal-close-hint { display: block; }
+  /* Tab quick-actions menu items (Export/Import CSV, History, Rename) were
+     left out of the mobile bigger-tap-target treatment above -- at
+     ~150x35px they sit below the ~44x44pt (iOS) / 48x48dp (Android)
+     platform-recommended minimum. Bumping to a 44px min-height (with
+     flex/align-items to vertically center the label regardless of its
+     line-height) brings them in line with the same tap-target goal the
+     .btn/.btn-color rule above already applies elsewhere. */
+  .tab-menu-item {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: var(--space-2) var(--space-3);
+  }
 }

@@ -65,6 +65,15 @@ const MIN_ROW_HEIGHT = 18;
 // drag-select" rather than "starting a scroll" -- see _onTouchStart.
 const TOUCH_DRAG_ARM_MS = 350;
 const TOUCH_DRAG_ARM_PX = 10;
+// A hold that's still going (with zero movement at all since touchstart)
+// this much longer than the drag-arm point above is treated as a genuine
+// long-press-to-open-context-menu gesture instead, matching the mouse
+// right-click/contextmenu path -- see _armTouchDragCandidate/_onTouchMove.
+// Must be strictly greater than TOUCH_DRAG_ARM_MS so the drag-arm's own
+// single-cell/row/col selection has already happened by the time this
+// fires (the menu then applies to that same selection, exactly like
+// _onContextMenu's own "select first, then open menu" order).
+const TOUCH_LONG_PRESS_MENU_MS = 550;
 // The row-header <col> (row numbers, leftmost) never had an explicit
 // width -- under table-layout:auto (before the resize-squeeze fix) that
 // was fine, content sized it. Under table-layout:fixed, a <col> with no
@@ -149,8 +158,8 @@ export class Grid {
     // (this.table, this.selected, ...) at call time, not at bind time, so
     // none of them care that this.table gets replaced by later rebuilds.
     document.addEventListener('mouseup', () => this._onMouseUp());
-    document.addEventListener('touchend', () => this._onTouchEnd());
-    document.addEventListener('touchcancel', () => this._onTouchEnd());
+    document.addEventListener('touchend', (e) => this._onTouchEnd(e));
+    document.addEventListener('touchcancel', (e) => this._onTouchEnd(e));
     document.addEventListener('keydown', (e) => this._onKeyDown(e));
     document.addEventListener('paste', (e) => this._onPaste(e));
     document.addEventListener('copy', (e) => this._onCopy(e));
@@ -1167,6 +1176,7 @@ export class Grid {
 
   _armTouchDragCandidate(candidate, touch) {
     if (this._touchDragTimer) clearTimeout(this._touchDragTimer);
+    if (this._touchLongPressTimer) clearTimeout(this._touchLongPressTimer);
     this._touchDragCandidate = { ...candidate, x: touch.clientX, y: touch.clientY, armed: false };
     this._touchDragTimer = setTimeout(() => {
       const c = this._touchDragCandidate;
@@ -1183,6 +1193,65 @@ export class Grid {
         this.selectWholeColumn(c.index, false);
       }
     }, TOUCH_DRAG_ARM_MS);
+    // Long-press-to-context-menu: a separate, longer timer racing the
+    // drag-arm one above. If the finger is still down and hasn't moved at
+    // all by this point, treat it as a deliberate long-press and open the
+    // same context menu the mouse contextmenu path opens (see
+    // _onContextMenu/app.js's 'gridcontextmenu' listener). Any real
+    // movement -- either before the drag-arm timer fires (see the "moved
+    // > TOUCH_DRAG_ARM_PX" scroll-detection branch below, which clears
+    // this timer too) or after it, once armed (a genuine drag-select) --
+    // cancels this timer, so "long-press-then-drag" keeps today's
+    // drag-select behavior instead of also popping a menu.
+    this._touchLongPressTimer = setTimeout(() => {
+      const c = this._touchDragCandidate;
+      if (!c) return;
+      this._openTouchContextMenu(c);
+    }, TOUCH_LONG_PRESS_MENU_MS);
+  }
+
+  /**
+   * Touch counterpart of _onContextMenu's dispatch, used by the long-press
+   * gesture above. By the time this runs, the drag-arm timer (which always
+   * fires first, since TOUCH_LONG_PRESS_MENU_MS > TOUCH_DRAG_ARM_MS) has
+   * already selected the held cell/row/column via the same
+   * _select/selectWholeRow/selectWholeColumn calls the mouse path uses, so
+   * this only needs to build the same `detail` shape _onContextMenu does
+   * and dispatch it -- app.js's listener doesn't know or care whether it
+   * came from a right-click or a long-press. Clears the touch-drag state
+   * so the eventual touchend doesn't also treat this as a released drag.
+   *
+   * Since touchstart/touchmove were never preventDefault()'d for this
+   * still-held gesture (no movement happened, so _onTouchMove's armed
+   * branch -- the only place that calls preventDefault -- never ran), the
+   * browser still owes this touch its usual mouse-event-and-click
+   * synthesis once the finger lifts. Left alone, that synthetic click
+   * would land on the cell/header underneath (not the menu, which wasn't
+   * there when the finger went down) and immediately close the
+   * just-opened menu via its own click-outside handler (app.js's
+   * showContextMenuAt) -- the menu would flash open and shut in one
+   * gesture. Arming `_suppressNextTouchClick` here, consumed by
+   * _onTouchEnd via preventDefault() on the touchend itself (which does
+   * suppress that synthesis, per the touch-events spec), avoids that.
+   */
+  _openTouchContextMenu(c) {
+    let detail;
+    if (c.kind === 'row') {
+      detail = { kind: 'row-header', rowIndex: c.index, x: c.x, y: c.y };
+    } else if (c.kind === 'col') {
+      detail = { kind: 'col-header', colIndex: c.index, x: c.x, y: c.y };
+    } else {
+      detail = { kind: 'cell', x: c.x, y: c.y };
+    }
+    this._touchDragCandidate = null;
+    this._dragging = false;
+    this._headerDragging = null;
+    this._suppressNextTouchClick = true;
+    if (this._touchDragTimer) {
+      clearTimeout(this._touchDragTimer);
+      this._touchDragTimer = null;
+    }
+    this.container.dispatchEvent(new CustomEvent('gridcontextmenu', { detail }));
   }
 
   _onTouchMove(e) {
@@ -1196,8 +1265,11 @@ export class Grid {
         // Moved before the arm-timer fired -- a scroll, not a range-select.
         // Don't preventDefault; let the browser scroll normally, and stop
         // tracking so a later pause-then-move in this same gesture can't
-        // retroactively arm drag-select mid-scroll.
+        // retroactively arm drag-select mid-scroll. Also cancels the
+        // long-press-to-menu timer -- movement means this was never a
+        // still long-press.
         clearTimeout(this._touchDragTimer);
+        clearTimeout(this._touchLongPressTimer);
         this._touchDragCandidate = null;
       }
       return;
@@ -1207,6 +1279,10 @@ export class Grid {
     // stays pinned to whatever touchstart hit (unlike mousemove, which
     // tracks the live element under the pointer), so elementFromPoint is
     // the only way to find what's actually under the finger right now.
+    // This is also real movement, so cancel the long-press-to-menu timer:
+    // a long-press that then drags keeps the existing drag-select
+    // behavior rather than also popping the context menu.
+    clearTimeout(this._touchLongPressTimer);
     e.preventDefault();
     const el = document.elementFromPoint(touch.clientX, touch.clientY);
     if (!el) return;
@@ -1221,14 +1297,27 @@ export class Grid {
       if (td && td.dataset.ref !== this.selected) {
         this.selected = td.dataset.ref;
         this._highlightRange(this.anchor, this.selected);
+        if (this.onSelectionChange) this.onSelectionChange(this.selected);
       }
     }
   }
 
-  _onTouchEnd() {
+  _onTouchEnd(e) {
     if (this._touchDragTimer) {
       clearTimeout(this._touchDragTimer);
       this._touchDragTimer = null;
+    }
+    if (this._touchLongPressTimer) {
+      clearTimeout(this._touchLongPressTimer);
+      this._touchLongPressTimer = null;
+    }
+    // See _openTouchContextMenu: swallow the mouse-event/click synthesis
+    // this touch would otherwise still get, so the freshly-opened context
+    // menu doesn't immediately close itself via its own click-outside
+    // handler.
+    if (this._suppressNextTouchClick) {
+      this._suppressNextTouchClick = false;
+      if (e && e.cancelable) e.preventDefault();
     }
     const c = this._touchDragCandidate;
     this._touchDragCandidate = null;
