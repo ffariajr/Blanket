@@ -582,6 +582,11 @@ table.grid th, table.grid td {
 }
 table.grid td { text-align: left; }
 table.grid td.wrap { white-space: normal; word-break: break-word; }
+/* Stand-ins for a whole range of currently-unmounted rows/columns under
+   grid virtualization (see grid.js's _renderWindow/_makeSpacerRow) --
+   pure layout filler, not a real cell, so none of the normal cell chrome
+   (border, padding, edit-affordance cursor) applies. */
+table.grid td.grid-spacer-cell { border: none; padding: 0; cursor: default; }
 /* Cell text/buttons render inside this wrapper, not the <td> directly --
    see grid.js _renderCell()'s comment: a <td>'s own explicit height is
    only a floor in table layout (same as a <tr height>), so overflow:hidden
