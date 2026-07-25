@@ -446,8 +446,9 @@ export class Grid {
       this._build();
       this._restoreScrollAnchor(scrollAnchor);
     } else if (changedRefs) {
-      // Structural changes already re-render every cell via _build()'s
-      // _renderAll() -- only the non-structural path needs an explicit
+      // Structural changes already re-render every mounted cell via
+      // _build()'s fresh _renderWindow() mount -- only the non-structural
+      // path needs an explicit
       // dependents pass, so a formula cell watching one of these refs
       // (e.g. D1="=B1+C1" watching a remote edit to B1) updates for every
       // connected viewer, not just the one who made the edit.
@@ -827,18 +828,29 @@ export class Grid {
   }
 
   /**
-   * Re-renders every cell that currently has a live DOM node -- i.e. every
-   * ref in _cellElements, which under windowing is just the visible+buffer
-   * range from the last _renderWindow() call, NOT the whole
-   * this.rows x this.cols grid (that was this method's pre-virtualization
-   * behavior). Nothing outside grid.js ever called this directly (grepped
-   * before repurposing it), so this is safe to redefine -- see
-   * BUGS_FOUND.md [021]/[024] for why rendering literally every cell on
-   * every rebuild doesn't scale. _renderWindow() calls this right after
-   * mounting a new set of cells; nothing else should need to.
+   * Renders cell CONTENT for exactly the given refs (an iterable of ref
+   * strings) -- called with "every ref newly mounted by the last
+   * _renderWindow() call" (see there and _reconcileWindow's doc comment),
+   * NOT every currently-mounted ref -- that was this method's older,
+   * destroy-and-recreate-everything-every-time behavior (see BUGS_FOUND.md
+   * [021]/[024]'s original write-up, and this commit's own perf write-up for
+   * why that destroy/recreate approach, while bounded and fine in isolation,
+   * turned out to make real integrated scroll performance WORSE than
+   * pre-virtualization master, not better).
+   *
+   * Under the recycling renderer, a ref that was already mounted before this
+   * remount and STAYS mounted keeps whatever content its <td> already has --
+   * nothing about its underlying data could have changed purely from a
+   * scroll. Every OTHER place cell data actually changes (setCellValue,
+   * applyRemote's non-structural branch, _recalcDependents) already calls
+   * _renderCell(ref) directly and immediately for a ref that's mounted at
+   * the time of the change; for one that's unmounted at that moment, the
+   * data (this.cells) is still updated correctly, and the fresh value is
+   * picked up for free the next time this method is called with that ref --
+   * i.e. exactly when it next becomes newly mounted, here.
    */
-  _renderAll() {
-    for (const ref of this._cellElements.keys()) {
+  _renderNewlyMountedRefs(refs) {
+    for (const ref of refs) {
       if (!this._isCovered(ref)) this._renderCell(ref);
     }
   }
@@ -1214,114 +1226,71 @@ export class Grid {
    * structural rebuild (_build() forces this via this._lastWindow = null),
    * and on every scroll/resize (_onScroll, the window 'resize' listener).
    *
-   * Chose destroy-and-recreate the whole windowed range on every call
-   * (build a brand-new <tbody>, discard the old one) over incrementally
-   * repositioning/recycling existing <tr>/<td> nodes -- simpler, and the
-   * usual argument against it (DOM churn is slow) doesn't hold up here:
-   * this is rAF-throttled (at most once per repaint, see _onScroll) and
-   * bounded by the WINDOW size (buffer-sized, not the whole sheet), so the
-   * amount of DOM work per remount stays constant regardless of total
-   * sheet size -- confirmed fast enough in practice against a 220x52
-   * sheet (see this commit's own perf measurement). Recycling would mean
-   * tracking which already-mounted node maps to which now-different
-   * ref/position, real extra complexity for a benefit that isn't needed to
-   * fix BUGS_FOUND.md [021]/[024] -- worth revisiting only if a future
-   * profile shows this approach's node-churn cost is itself a bottleneck.
+   * RECYCLES existing <tr>/<td> nodes across a scroll-driven remount rather
+   * than destroying and rebuilding the whole windowed <tbody> every time
+   * (see _reconcileWindow) -- a row/column that's already mounted and stays
+   * in the new window just gets repositioned/left alone; only a row/column
+   * actually entering the window gets a genuinely new node, and only one
+   * actually leaving gets removed. An earlier version of this method did
+   * destroy-and-recreate the whole window every call, reasoning that a
+   * rAF-throttled, window-bounded rebuild would be cheap regardless of
+   * total sheet size -- true in an isolated micro-benchmark (no real CSS/
+   * formatting/style-recalc cost), but confirmed via real-Chromium
+   * measurement against the actual integrated app (220x52 sheet, real
+   * app.css) to make real scroll performance measurably WORSE than
+   * pre-virtualization master, not better -- the node-churn/style-recalc
+   * cost of genuinely new elements on every single scroll tick outweighed
+   * the "bounded, not O(sheet size)" argument. Recycling fixes that while
+   * keeping every win the destroy/recreate version had: DOM node count
+   * still bounded by the window (not sheet) size, cold load still only
+   * mounts one window's worth of nodes, and the window/merge-boundary
+   * computation itself (_computeVisibleWindow) is untouched.
+   *
+   * Falls back to a full (re)mount (_mountWindowFull) -- functionally
+   * identical to the old destroy/recreate behavior -- whenever there's no
+   * valid previous window to reconcile FROM (this._tbody is null, e.g.
+   * right after _build() reset it, or this._lastWindow was explicitly
+   * nulled, e.g. applyRemote's columnWidths/rowHeights branch forcing a
+   * fresh layout after pixel offsets changed). That's the correct
+   * fallback, not just a convenient one: reconciliation assumes
+   * this._rowElements/_cellElements/tr._leftSpacer etc. already correctly
+   * reflect a previously-mounted window, which isn't true the first time a
+   * table exists.
    *
    * A no-op if the computed window is identical to the last one rendered
    * (e.g. a sub-pixel/no-op scroll event, or a resize that didn't actually
-   * change the visible range) -- avoids needless DOM churn on every single
+   * change the visible range) -- avoids needless DOM work on every single
    * scroll event even before the rAF throttle in _onScroll kicks in.
    */
   _renderWindow() {
     if (!this.table) return;
     const win = this._computeVisibleWindow();
-    if (this._lastWindow
-      && this._lastWindow.rowStart === win.rowStart && this._lastWindow.rowEnd === win.rowEnd
-      && this._lastWindow.colStart === win.colStart && this._lastWindow.colEnd === win.colEnd) {
+    const prevWindow = this._lastWindow;
+    if (prevWindow
+      && prevWindow.rowStart === win.rowStart && prevWindow.rowEnd === win.rowEnd
+      && prevWindow.colStart === win.colStart && prevWindow.colEnd === win.colEnd) {
       return;
     }
     this._lastWindow = { rowStart: win.rowStart, rowEnd: win.rowEnd, colStart: win.colStart, colEnd: win.colEnd };
-    const { rowTops, colLefts, rowStart, rowEnd, colStart, colEnd } = win;
 
-    const tbody = document.createElement('tbody');
-    this._cellElements = new Map();
-    this._rowElements = [];
-    this._rowHeaderElements = [];
-
-    if (rowStart > 0) tbody.appendChild(this._makeSpacerRow(rowTops[rowStart], this.cols + 1));
-
-    for (let r = rowStart; r <= rowEnd; r++) {
-      const rowNum = r + 1;
-      const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
-      const tr = document.createElement('tr');
-      tr.style.height = rowHeight + 'px';
-      this._rowElements[r] = tr;
-      const rowHead = document.createElement('th');
-      rowHead.textContent = String(rowNum);
-      rowHead.dataset.rowIndex = String(r);
-      rowHead.addEventListener('mousedown', (e) => this._onRowHeaderMouseDown(e, r));
-      rowHead.addEventListener('touchstart', (e) => this._onRowHeaderTouchStart(e, r), { passive: true });
-      this._rowHeaderElements[r] = rowHead;
-      rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
-      // See _build()'s original comment on this same block for why the
-      // explicit height+overflow lives on each cell, not just the <tr>.
-      rowHead.style.height = rowHeight + 'px';
-      rowHead.style.overflow = 'hidden';
-      tr.appendChild(rowHead);
-
-      if (colStart > 0) {
-        const left = document.createElement('td');
-        left.className = 'grid-spacer-cell';
-        left.colSpan = colStart;
-        tr.appendChild(left);
-      }
-
-      for (let c = colStart; c <= colEnd; c++) {
-        const ref = colLetter(c) + rowNum;
-        if (this._coverage.has(ref)) continue; // reserved by an earlier cell's colspan/rowspan
-        const td = document.createElement('td');
-        td.dataset.ref = ref;
-        td.tabIndex = -1;
-        const merge = this.cells[ref] && this.cells[ref].merge;
-        if (merge) {
-          if (merge.cols > 1) td.colSpan = merge.cols;
-          if (merge.rows > 1) td.rowSpan = merge.rows;
-        }
-        if (!merge || !merge.rows || merge.rows <= 1) {
-          td.style.height = rowHeight + 'px';
-          td.style.overflow = 'hidden';
-        }
-        tr.appendChild(td);
-        this._cellElements.set(ref, td);
-      }
-
-      if (colEnd < this.cols - 1) {
-        const right = document.createElement('td');
-        right.className = 'grid-spacer-cell';
-        right.colSpan = this.cols - 1 - colEnd;
-        tr.appendChild(right);
-      }
-
-      tbody.appendChild(tr);
+    let newlyMountedRefs;
+    if (!this._tbody || !prevWindow) {
+      this._mountWindowFull(win);
+      newlyMountedRefs = this._cellElements.keys();
+    } else {
+      newlyMountedRefs = this._reconcileWindow(prevWindow, win);
     }
-
-    if (rowEnd < this.rows - 1) {
-      tbody.appendChild(this._makeSpacerRow(rowTops[this.rows] - rowTops[rowEnd + 1], this.cols + 1));
-    }
-
-    if (this._tbody) this.table.replaceChild(tbody, this._tbody);
-    else this.table.appendChild(tbody);
-    this._tbody = tbody;
 
     // A live row-resize drag (_onResizeMove/_resizing) holds a direct
     // reference to the <tr> it's dragging -- if a scroll-driven remount
-    // just replaced that node (this method just discarded the whole old
-    // <tbody>), the drag's `el` is now a detached, orphaned node: further
-    // live-height writes during the drag would silently apply to nothing
-    // visible. Rebind to the freshly-mounted <tr> for the same row (if
-    // it's still in the window) and reapply whatever live size the drag
-    // was already showing, so the resize continues seamlessly instead of
+    // just dropped that row from the window (recycling removes/re-creates
+    // individual rows, so this can still happen even though most rows
+    // survive a remount untouched now), the drag's `el` is a detached,
+    // orphaned node: further live-height writes during the drag would
+    // silently apply to nothing visible. Rebind to the freshly-mounted
+    // <tr> for the same row (if it's still in the window, whether recycled
+    // or newly created) and reapply whatever live size the drag was
+    // already showing, so the resize continues seamlessly instead of
     // visually freezing. If the row scrolled fully out of the new window,
     // there's genuinely no handle for it any more -- `el` stays stale, but
     // _onResizeEnd still commits the correct final size from `key`/
@@ -1338,15 +1307,346 @@ export class Grid {
       }
     }
 
-    this._renderAll(); // fill in content for whatever's now mounted
+    // Fill in content only for cells that are actually new to the DOM this
+    // pass -- see _renderNewlyMountedRefs's doc comment for why a recycled,
+    // still-mounted cell doesn't need (and must NOT get, to preserve the
+    // whole point of recycling) a redundant re-render here.
+    this._renderNewlyMountedRefs(newlyMountedRefs);
 
-    // The DOM nodes backing the selection are entirely new -- state
-    // (this.anchor/this.selected) is unaffected by a remount, so just
-    // reapply it to whichever refs happen to be mounted now;
-    // _highlightRange already no-ops for a ref with no live node.
+    // The DOM nodes backing the selection may be new (or, for a recycled
+    // cell, may already have the right highlight class from before -- this
+    // is idempotent either way) -- state (this.anchor/this.selected) is
+    // unaffected by a remount, so just reapply it to whichever refs happen
+    // to be mounted now; _highlightRange already no-ops for a ref with no
+    // live node.
     if (this.anchor && this.selected) this._highlightRange(this.anchor, this.selected);
 
     if (this.onWindowChange) this.onWindowChange();
+  }
+
+  /**
+   * Builds one <td> for `ref` (registering it in this._cellElements) --
+   * shared by the full-mount path and the recycling path's "genuinely new
+   * cell" case, so both apply IDENTICAL merge-span/height/overflow setup.
+   * Caller is responsible for checking this._coverage first (a
+   * merge-covered ref never gets its own node, on either path) and for
+   * actually inserting the returned node into the DOM.
+   */
+  _createCellNode(ref, rowNum, rowHeight) {
+    const td = document.createElement('td');
+    td.dataset.ref = ref;
+    td.tabIndex = -1;
+    const merge = this.cells[ref] && this.cells[ref].merge;
+    if (merge) {
+      if (merge.cols > 1) td.colSpan = merge.cols;
+      if (merge.rows > 1) td.rowSpan = merge.rows;
+    }
+    if (!merge || !merge.rows || merge.rows <= 1) {
+      td.style.height = rowHeight + 'px';
+      td.style.overflow = 'hidden';
+    }
+    this._cellElements.set(ref, td);
+    return td;
+  }
+
+  /**
+   * Builds one full <tr> (row header + spacer(s) + data cells) for row `r`
+   * across column range [colStart, colEnd] -- shared by the full-mount path
+   * and the recycling path's "genuinely new row" case. Registers the <tr>/
+   * row-header <th> in this._rowElements/_rowHeaderElements, and stashes
+   * the left/right spacer <td> elements directly on the <tr> itself
+   * (`tr._leftSpacer`/`tr._rightSpacer`) so a later column-window change
+   * that keeps this same row mounted (_reconcileRowColumns) can find and
+   * resize/remove/recreate them in O(1) without re-querying the DOM. Does
+   * NOT append the returned <tr> anywhere -- the caller decides where it
+   * goes in the tbody.
+   */
+  _createRowNode(r, colStart, colEnd) {
+    const rowNum = r + 1;
+    const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
+    const tr = document.createElement('tr');
+    tr.style.height = rowHeight + 'px';
+    this._rowElements[r] = tr;
+    const rowHead = document.createElement('th');
+    rowHead.textContent = String(rowNum);
+    rowHead.dataset.rowIndex = String(r);
+    rowHead.addEventListener('mousedown', (e) => this._onRowHeaderMouseDown(e, r));
+    rowHead.addEventListener('touchstart', (e) => this._onRowHeaderTouchStart(e, r), { passive: true });
+    this._rowHeaderElements[r] = rowHead;
+    rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
+    // See _build()'s original comment on this same block for why the
+    // explicit height+overflow lives on each cell, not just the <tr>.
+    rowHead.style.height = rowHeight + 'px';
+    rowHead.style.overflow = 'hidden';
+    tr.appendChild(rowHead);
+
+    tr._leftSpacer = null;
+    tr._rightSpacer = null;
+
+    if (colStart > 0) {
+      tr._leftSpacer = document.createElement('td');
+      tr._leftSpacer.className = 'grid-spacer-cell';
+      tr._leftSpacer.colSpan = colStart;
+      tr.appendChild(tr._leftSpacer);
+    }
+
+    for (let c = colStart; c <= colEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      if (this._coverage.has(ref)) continue; // reserved by an earlier cell's colspan/rowspan
+      tr.appendChild(this._createCellNode(ref, rowNum, rowHeight));
+    }
+
+    if (colEnd < this.cols - 1) {
+      tr._rightSpacer = document.createElement('td');
+      tr._rightSpacer.className = 'grid-spacer-cell';
+      tr._rightSpacer.colSpan = this.cols - 1 - colEnd;
+      tr.appendChild(tr._rightSpacer);
+    }
+
+    return tr;
+  }
+
+  /**
+   * Removes row `r`'s <tr> (and its row-header <th>, and every data <td> it
+   * held) from the DOM and from this._rowElements/_rowHeaderElements/
+   * _cellElements -- used when a scroll-driven remount drops a row from the
+   * window entirely. Cleaning up _cellElements here (not just detaching the
+   * <tr>, which would clean up its children for free as far as the DOM goes)
+   * is required for _cellEl()'s "null means not currently mounted" contract
+   * to stay correct -- otherwise a removed row's cells would still resolve
+   * to a (now-detached) node instead of null.
+   */
+  _removeRow(r) {
+    const tr = this._rowElements[r];
+    if (!tr) return;
+    for (const child of tr.children) {
+      if (child.dataset && child.dataset.ref) this._cellElements.delete(child.dataset.ref);
+    }
+    tr.remove();
+    delete this._rowElements[r];
+    delete this._rowHeaderElements[r];
+  }
+
+  /**
+   * Full (re)mount of the tbody for the given window -- functionally
+   * identical to _renderWindow's old unconditional behavior (build a brand
+   * new <tbody>, discard whatever was there before). Used only when there's
+   * no valid previous window to reconcile from (see _renderWindow's doc
+   * comment on when that's the case) -- i.e. exactly the situations where
+   * the old destroy/recreate approach's cost was never the problem in the
+   * first place (once per structural rebuild or remote pixel-offset patch,
+   * not once per scroll tick).
+   */
+  _mountWindowFull(win) {
+    const { rowTops, rowStart, rowEnd, colStart, colEnd } = win;
+    const tbody = document.createElement('tbody');
+    this._cellElements = new Map();
+    this._rowElements = [];
+    this._rowHeaderElements = [];
+    this._topSpacerRow = null;
+    this._bottomSpacerRow = null;
+
+    if (rowStart > 0) {
+      this._topSpacerRow = this._makeSpacerRow(rowTops[rowStart], this.cols + 1);
+      tbody.appendChild(this._topSpacerRow);
+    }
+
+    for (let r = rowStart; r <= rowEnd; r++) {
+      tbody.appendChild(this._createRowNode(r, colStart, colEnd));
+    }
+
+    if (rowEnd < this.rows - 1) {
+      this._bottomSpacerRow = this._makeSpacerRow(rowTops[this.rows] - rowTops[rowEnd + 1], this.cols + 1);
+      tbody.appendChild(this._bottomSpacerRow);
+    }
+
+    if (this._tbody) this.table.replaceChild(tbody, this._tbody);
+    else this.table.appendChild(tbody);
+    this._tbody = tbody;
+  }
+
+  /**
+   * Reconciles the currently-mounted tbody (built from `prevWindow`) toward
+   * `win`, recycling every row/column that's in both ranges instead of
+   * touching it at all, and returns the Set of refs that are newly mounted
+   * this pass (genuinely new cells, from either a newly-created row or a
+   * newly-entering column within a kept row) -- exactly what
+   * _renderNewlyMountedRefs needs to render content for.
+   *
+   * Both `prevWindow` and `win`'s row (and column) ranges are contiguous
+   * integer intervals (see _computeVisibleWindow), so "removed" is always
+   * at most a prefix + a suffix of the old range, and "added" is always at
+   * most a prefix + a suffix of the new range -- true even for a large,
+   * non-overlapping jump (e.g. Home/End or a fast fling), where the
+   * min/max-clamped ranges below correctly degenerate to "remove
+   * everything old" / "add everything new". No generic set-diffing needed.
+   */
+  _reconcileWindow(prevWindow, win) {
+    const { rowTops, rowStart, rowEnd, colStart, colEnd } = win;
+    const pRS = prevWindow.rowStart, pRE = prevWindow.rowEnd;
+    const pCS = prevWindow.colStart, pCE = prevWindow.colEnd;
+    const tbody = this._tbody;
+    const newlyMounted = new Set();
+
+    // Spacer rows are cheap (one <tr>/<td> pair each) -- always drop and
+    // recreate them fresh at the end, rather than reconciling them like
+    // real content rows. Removing them up front also means the "current
+    // first/last child" anchors used below never have to account for them.
+    if (this._topSpacerRow) { this._topSpacerRow.remove(); this._topSpacerRow = null; }
+    if (this._bottomSpacerRow) { this._bottomSpacerRow.remove(); this._bottomSpacerRow = null; }
+
+    // Rows leaving the window (top edge, then bottom edge).
+    for (let r = pRS; r <= Math.min(pRE, rowStart - 1); r++) this._removeRow(r);
+    for (let r = Math.max(pRS, rowEnd + 1); r <= pRE; r++) this._removeRow(r);
+
+    // Rows kept in both windows: recycle the <tr> in place, only
+    // adjusting its columns (which may themselves have changed).
+    const keptRowStart = Math.max(pRS, rowStart);
+    const keptRowEnd = Math.min(pRE, rowEnd);
+    for (let r = keptRowStart; r <= keptRowEnd; r++) {
+      const tr = this._rowElements[r];
+      if (!tr) continue; // shouldn't happen, but never crash rendering over it
+      this._reconcileRowColumns(r, tr, pCS, pCE, colStart, colEnd, newlyMounted);
+    }
+
+    // Rows newly entering the window (top edge, then bottom edge). Ascending
+    // insertBefore(newTr, topAnchor) against the SAME fixed anchor node
+    // produces ascending DOM order for free (each new row lands directly
+    // before whatever was already there, pushing nothing else around) --
+    // topAnchor is captured once, before any of these insertions, and stays
+    // a valid reference throughout since none of these insertions remove
+    // it. Bottom-entering rows use plain appendChild for the same reason,
+    // in reverse (append preserves ascending order when done in ascending
+    // source order).
+    const topAnchor = tbody.firstChild;
+    for (let r = rowStart; r <= Math.min(rowEnd, pRS - 1); r++) {
+      tbody.insertBefore(this._createRowNode(r, colStart, colEnd), topAnchor);
+      this._collectRowRefs(this._rowElements[r], newlyMounted);
+    }
+    for (let r = Math.max(rowStart, pRE + 1); r <= rowEnd; r++) {
+      tbody.appendChild(this._createRowNode(r, colStart, colEnd));
+      this._collectRowRefs(this._rowElements[r], newlyMounted);
+    }
+
+    if (rowStart > 0) {
+      this._topSpacerRow = this._makeSpacerRow(rowTops[rowStart], this.cols + 1);
+      tbody.insertBefore(this._topSpacerRow, tbody.firstChild);
+    }
+    if (rowEnd < this.rows - 1) {
+      this._bottomSpacerRow = this._makeSpacerRow(rowTops[this.rows] - rowTops[rowEnd + 1], this.cols + 1);
+      tbody.appendChild(this._bottomSpacerRow);
+    }
+
+    return newlyMounted;
+  }
+
+  /** Adds every data-cell ref found among `tr`'s children into `into` (a
+   * Set) -- used right after _createRowNode to record which refs a
+   * brand-new row just introduced, for _reconcileWindow's return value. */
+  _collectRowRefs(tr, into) {
+    if (!tr) return;
+    for (const child of tr.children) {
+      if (child.dataset && child.dataset.ref) into.add(child.dataset.ref);
+    }
+  }
+
+  /**
+   * Reconciles a single KEPT row's columns from [prevColStart, prevColEnd]
+   * to [colStart, colEnd] -- removes cells leaving at either edge, resizes/
+   * creates/removes the left/right spacer <td>s, and creates cells newly
+   * entering at either edge, inserting each at the correct position without
+   * disturbing any cell that was already there and stays. Newly-created
+   * refs are added to `newlyMounted` (mutated in place) so the caller can
+   * render their content afterward.
+   *
+   * Insertion uses the same "ascending inserts against one fixed anchor"
+   * trick _reconcileWindow uses for rows (see there): `leftAnchor` and
+   * `rightAnchor` are captured once, before any mutation that could affect
+   * them, and referenced as actual DOM nodes (not positions/indices), so
+   * they stay valid through every subsequent insertBefore/remove/create
+   * this method does.
+   *
+   * Deliberately does NOT touch a kept cell's rowSpan/colSpan (unlike the
+   * fresh-creation path in _createCellNode, which sets it from
+   * this.cells[ref].merge) -- merges only ever change via a structural
+   * _build() rebuild, which always does a full remount (_mountWindowFull),
+   * never reaches this method with a stale span. Within one _build()
+   * generation, a given ref's merge span is invariant across any number of
+   * scroll-driven reconciliations.
+   */
+  _reconcileRowColumns(r, tr, prevColStart, prevColEnd, colStart, colEnd, newlyMounted) {
+    const rowNum = r + 1;
+    const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
+
+    // Columns leaving on the left edge, then the right edge. A covered
+    // (merge-spanned-over) ref never had an entry in this._cellElements,
+    // so the lookup is just a no-op for those -- safe either way.
+    for (let c = prevColStart; c <= Math.min(prevColEnd, colStart - 1); c++) {
+      const ref = colLetter(c) + rowNum;
+      const td = this._cellElements.get(ref);
+      if (td) { td.remove(); this._cellElements.delete(ref); }
+    }
+    for (let c = Math.max(prevColStart, colEnd + 1); c <= prevColEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      const td = this._cellElements.get(ref);
+      if (td) { td.remove(); this._cellElements.delete(ref); }
+    }
+
+    // Captured BEFORE touching the left spacer -- if a left spacer already
+    // existed, this is exactly the first surviving element after it (the
+    // leftmost kept cell, or the right spacer, or null); if it didn't,
+    // tr.children[1] (index 0 is always the row-header <th>) is that same
+    // "first surviving element" directly. Either way this reference stays
+    // valid through the spacer create/resize/remove below and the
+    // left-edge insert loop after it.
+    const leftAnchor = tr._leftSpacer ? tr._leftSpacer.nextSibling : (tr.children[1] || null);
+
+    if (colStart > 0) {
+      if (!tr._leftSpacer) {
+        tr._leftSpacer = document.createElement('td');
+        tr._leftSpacer.className = 'grid-spacer-cell';
+        tr.insertBefore(tr._leftSpacer, tr.children[1] || null);
+      }
+      tr._leftSpacer.colSpan = colStart;
+    } else if (tr._leftSpacer) {
+      tr._leftSpacer.remove();
+      tr._leftSpacer = null;
+    }
+
+    // Columns newly entering on the left edge, ascending, each inserted
+    // right before leftAnchor -- see the class-level doc comment for why
+    // ascending source order against one fixed anchor yields ascending DOM
+    // order.
+    const leftAddEnd = Math.min(colEnd, prevColStart - 1);
+    for (let c = colStart; c <= leftAddEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      if (this._coverage.has(ref)) continue;
+      tr.insertBefore(this._createCellNode(ref, rowNum, rowHeight), leftAnchor);
+      newlyMounted.add(ref);
+    }
+
+    // Captured before touching the right spacer, for the same reason as
+    // leftAnchor above.
+    const rightAnchor = tr._rightSpacer || null;
+    const rightAddStart = Math.max(prevColEnd + 1, colStart);
+    for (let c = rightAddStart; c <= colEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      if (this._coverage.has(ref)) continue;
+      tr.insertBefore(this._createCellNode(ref, rowNum, rowHeight), rightAnchor);
+      newlyMounted.add(ref);
+    }
+
+    if (colEnd < this.cols - 1) {
+      if (!tr._rightSpacer) {
+        tr._rightSpacer = document.createElement('td');
+        tr._rightSpacer.className = 'grid-spacer-cell';
+        tr.appendChild(tr._rightSpacer); // every real cell for this row is already placed -- true end is correct
+      }
+      tr._rightSpacer.colSpan = this.cols - 1 - colEnd;
+    } else if (tr._rightSpacer) {
+      tr._rightSpacer.remove();
+      tr._rightSpacer = null;
+    }
   }
 
   /** A single spacer <tr> occupying `height`px, standing in for every row
@@ -1790,8 +2090,9 @@ export class Grid {
    * _build() rebuild (setCellValue, applyRemote's non-structural cell
    * branch, _clearSelection, USERINFO's direct-mutation renders) --
    * anything that already triggers _build() (merge/unmerge, remote
-   * structural patches, insert/delete row/col) re-renders every cell via
-   * _renderAll() regardless, so dependents are already covered there.
+   * structural patches, insert/delete row/col) re-renders every mounted
+   * cell via _build()'s fresh _renderWindow() mount regardless, so
+   * dependents are already covered there.
    */
   _recalcDependents(changedRefs) {
     const dependents = this._buildDependents();
