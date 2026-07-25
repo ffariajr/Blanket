@@ -1872,7 +1872,16 @@ export class Grid {
       if (!el) return false;
       if (kind === 'cell') return !!el.closest('td');
       if (kind === 'row') return !!el.closest('tbody th');
-      return !!el.closest('thead th');
+      // 'col': the empty top-left CORNER <th> (built before the per-column
+      // loop in _build(), see there) also matches a bare
+      // `el.closest('thead th')` test -- it IS a `thead th` -- but it has
+      // no data-col-index and isn't a real column header, so accepting it
+      // here would return early (below) with a "match" that every caller's
+      // own `th.dataset.colIndex !== undefined` check then rejects,
+      // silently freezing the drag instead of falling through to the
+      // clamp logic that would have found the real column-header <th>.
+      const th = el.closest('thead th');
+      return !!th && th.dataset.colIndex !== undefined;
     };
     if (matches(first)) return first;
     if (!this.container || !this.table) return first;
@@ -1907,8 +1916,20 @@ export class Grid {
       if (y < contentTop + stickyTopHeight) cy = contentTop + stickyTopHeight + 1;
     } else if (kind === 'row') {
       cx = contentLeft + Math.min(stickyLeftWidth - 1, stickyLeftWidth / 2);
+      // Same y-clamp as 'cell' above: the pointer during a row-header drag
+      // held straight up toward row 1 is naturally sitting inside the
+      // sticky thead band (that's the direction it's being dragged), which
+      // hit-tests to a thead <th>, not the tbody <th> this kind needs --
+      // without also pushing y past it here, the drag freezes just short
+      // of row 1 even though scrollTop correctly reaches 0.
+      if (y < contentTop + stickyTopHeight) cy = contentTop + stickyTopHeight + 1;
     } else {
       cy = contentTop + Math.min(stickyTopHeight - 1, stickyTopHeight / 2);
+      // Transposed counterpart: a col-header drag held toward column A is
+      // naturally sitting inside the sticky row-header column, which
+      // hit-tests to that column (or the top-left CORNER <th> -- see
+      // `matches` above) instead of a real column-header <th>.
+      if (x < contentLeft + stickyLeftWidth) cx = contentLeft + stickyLeftWidth + 1;
     }
     if (cx === x && cy === y) return first; // clamping wouldn't change anything -- nothing more to try
     return document.elementFromPoint(cx, cy);
