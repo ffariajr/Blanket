@@ -1876,19 +1876,39 @@ export class Grid {
     };
     if (matches(first)) return first;
     if (!this.container || !this.table) return first;
+    // getBoundingClientRect() reports the container's BORDER box -- rect.
+    // left/rect.top are the outer edge of its 1px `.grid-scroll` border
+    // (see app.css), not where its content (and the sticky th's stuck to
+    // it) actually starts. The sticky row-header/column-header elements are
+    // positioned relative to the content box, one border-width further in,
+    // so clamping straight off rect.left/rect.top (as this used to) landed
+    // short by exactly that border width -- at the scroll floor (scrollTop/
+    // scrollLeft === 0, the only time this clamp path is actually reachable
+    // for the true top-left corner) elementFromPoint at the clamped point
+    // then still hit the sticky <th> instead of the intended <td>, so a
+    // drag-select could get right up to the corner and then permanently
+    // stop extending on that axis even though auto-scroll kept scrolling.
+    // Confirmed via real-Chromium measurement: rowHeaderTh/thead's own
+    // getBoundingClientRect().left/top already sit at rect.left/top +
+    // this border width, not at rect.left/top directly.
+    const containerStyle = getComputedStyle(this.container);
+    const borderLeft = parseFloat(containerStyle.borderLeftWidth) || 0;
+    const borderTop = parseFloat(containerStyle.borderTopWidth) || 0;
     const rect = this.container.getBoundingClientRect();
+    const contentLeft = rect.left + borderLeft;
+    const contentTop = rect.top + borderTop;
     const rowHeaderTh = this.table.querySelector('tbody th');
     const stickyLeftWidth = rowHeaderTh ? rowHeaderTh.getBoundingClientRect().width : ROW_HEADER_WIDTH;
     const thead = this.table.querySelector('thead');
     const stickyTopHeight = thead ? thead.getBoundingClientRect().height : 0;
     let cx = x, cy = y;
     if (kind === 'cell') {
-      if (x < rect.left + stickyLeftWidth) cx = rect.left + stickyLeftWidth + 1;
-      if (y < rect.top + stickyTopHeight) cy = rect.top + stickyTopHeight + 1;
+      if (x < contentLeft + stickyLeftWidth) cx = contentLeft + stickyLeftWidth + 1;
+      if (y < contentTop + stickyTopHeight) cy = contentTop + stickyTopHeight + 1;
     } else if (kind === 'row') {
-      cx = rect.left + Math.min(stickyLeftWidth - 1, stickyLeftWidth / 2);
+      cx = contentLeft + Math.min(stickyLeftWidth - 1, stickyLeftWidth / 2);
     } else {
-      cy = rect.top + Math.min(stickyTopHeight - 1, stickyTopHeight / 2);
+      cy = contentTop + Math.min(stickyTopHeight - 1, stickyTopHeight / 2);
     }
     if (cx === x && cy === y) return first; // clamping wouldn't change anything -- nothing more to try
     return document.elementFromPoint(cx, cy);
