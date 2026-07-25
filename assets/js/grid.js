@@ -185,6 +185,13 @@ export class Grid {
     this.editingInput = null;
     this._dragging = false;
     this._headerDragging = null; // 'row'|'col'|null -- see _onRowHeaderMouseDown/_onColHeaderMouseDown
+    // Drag-select auto-scroll state (mouse AND touch, see
+    // _startDragAutoScroll/_dragAutoScrollTick) -- an interval, not just
+    // mousemove-driven, so a pointer held stationary at the viewport edge
+    // still keeps advancing the window (mousemove stops firing once the
+    // pointer itself stops moving).
+    this._dragAutoScrollTimer = null;
+    this._lastPointerXY = null; // {x, y} in viewport (clientX/clientY) coords, updated on every drag-relevant move
     this._touchDragCandidate = null; // {kind, ref|index, x, y, armed} -- see _onTouchStart
     this._touchDragTimer = null;
     this._headerAnchorRow = null; // anchor row/col for a whole-row/column selection -- see selectWholeRow/Column
@@ -835,6 +842,167 @@ export class Grid {
     return lefts;
   }
 
+  /**
+   * Scrolls the container just enough (minimal adjustment, never more than
+   * needed -- not "center it") to bring `ref` fully into view, if it isn't
+   * already -- e.g. arrow-key traversal (_moveSelection, via _select) or a
+   * whole-row/column header selection landing outside the currently
+   * visible viewport. A merge origin's full span (not just its 1x1 top-
+   * left position) is what has to become visible -- a merge covering rows
+   * 5-7 isn't "in view" if only row 5 is. No-ops (and so never forces a
+   * render) if the ref is already fully visible, so normal same-window
+   * selection changes (the overwhelming majority) never touch scrollTop/
+   * scrollLeft or trigger an extra _renderWindow() call.
+   */
+  _scrollRefIntoView(ref) {
+    if (!this.container || !this._refInBounds(ref)) return;
+    const p = parseRef(ref);
+    const cell = this.cells[ref];
+    const merge = cell && cell.merge;
+    const rowSpan = (merge && merge.rows) || 1;
+    const colSpan = (merge && merge.cols) || 1;
+    this._scrollRowIntoView(p.row, rowSpan);
+    this._scrollColIntoView(p.col, colSpan);
+  }
+
+  /**
+   * Row counterpart used directly by _scrollRefIntoView above and by
+   * selectWholeRow (whose "selected" ref is the far edge column, not
+   * useful for deciding vertical scroll position -- the row index itself
+   * is what matters there). `span` covers a rowSpan>1 merge origin.
+   *
+   * This is a two-pass scroll: an initial estimate from the LOGICAL model
+   * (_rowTops(), built from rowHeights) gets the target row mounted (all
+   * _computeVisibleWindow's buffer needs to guarantee that), followed by
+   * _correctRowScrollForRealHeight's exact correction using the row's REAL
+   * rendered position once it exists -- see that method's doc comment for
+   * why the logical estimate alone isn't precise enough on its own.
+   */
+  _scrollRowIntoView(row, span = 1) {
+    if (!this.container) return;
+    const rowTops = this._rowTops();
+    const top = rowTops[row];
+    const bottom = rowTops[Math.min(this.rows, row + span)];
+    const viewTop = this.container.scrollTop;
+    const viewH = this.container.clientHeight;
+    let next = null;
+    if (top < viewTop) next = top;
+    else if (bottom > viewTop + viewH) next = Math.max(0, bottom - viewH);
+    if (next !== null && next !== viewTop) {
+      this.container.scrollTop = next;
+      // Recompute/remount immediately rather than waiting for the
+      // container's own async 'scroll' event + rAF throttle (_onScroll) --
+      // the caller (selection change) needs the newly-selected ref's <td>
+      // to exist right away (e.g. _highlightRange/_beginEdit run right
+      // after). _renderWindow() itself no-ops if this didn't actually
+      // change the windowed range, so this never causes extra churn beyond
+      // what the scroll already required.
+      this._renderWindow();
+    }
+    this._correctRowScrollForRealHeight(row, span);
+  }
+
+  /**
+   * _rowTops()'s cumulative offsets are built from rowHeights -- the
+   * CONTENT height a row's cell-content wrapper is explicitly clipped to
+   * (see _renderCell's own doc comment on why that's a separate div from
+   * the <td> itself), not the actual on-screen height of the rendered
+   * <tr>, which is a few px taller (table.grid td/th's own padding+border,
+   * see app.css) since a <tr>'s CSS height is only ever a floor under
+   * table layout, never a ceiling. That gap is invisible anywhere else in
+   * this file (nothing before virtualization ever computed a pixel
+   * position from rowHeights and compared it against a real scrollTop),
+   * but _scrollRowIntoView's logical-estimate pass above is exactly that
+   * computation -- confirmed via real-Chromium measurement to drift by
+   * multiple rows' worth of px once dozens of rows are mounted at once
+   * (real per-row height minus logical, times however many real rows sit
+   * between the viewport's edge and the target row), enough to leave the
+   * "scrolled into view" row actually just outside the viewport.
+   *
+   * Also accounts for the sticky <thead> (table.grid thead th { top: 0 },
+   * see app.css): a row whose top is geometrically within the container's
+   * own bounding box can still be entirely covered by the pinned header if
+   * it sits in that reserved band -- the logical model has no notion of
+   * this either.
+   *
+   * This runs AFTER the logical-estimate scroll has had a chance to mount
+   * the target row (that's the only reason the estimate pass exists at
+   * all -- _computeVisibleWindow can't mount a row it doesn't know to
+   * consider), then measures the row's real getBoundingClientRect() and
+   * nudges scrollTop by the exact remaining pixel delta, if any. A no-op
+   * if the row still isn't mounted (e.g. genuinely out of bounds) or is
+   * already fully visible.
+   */
+  _correctRowScrollForRealHeight(row, span = 1) {
+    if (!this.container || !this.table) return;
+    const startEl = this._rowElements[row];
+    const endEl = this._rowElements[Math.min(this.rows, row + span) - 1] || startEl;
+    if (!startEl || !endEl) return;
+    const containerRect = this.container.getBoundingClientRect();
+    const thead = this.table.querySelector('thead');
+    const stickyTop = containerRect.top + (thead ? thead.getBoundingClientRect().height : 0);
+    const startRect = startEl.getBoundingClientRect();
+    const endRect = endEl.getBoundingClientRect();
+    let delta = 0;
+    if (startRect.top < stickyTop) delta = startRect.top - stickyTop;
+    else if (endRect.bottom > containerRect.bottom) delta = endRect.bottom - containerRect.bottom;
+    if (delta) {
+      this.container.scrollTop = Math.max(0, this.container.scrollTop + delta);
+      this._renderWindow();
+    }
+  }
+
+  /** Column counterpart of _scrollRowIntoView -- see there for the overall
+   * two-pass shape. Columns don't suffer _scrollRowIntoView's real-vs-
+   * logical height drift (table-layout:fixed, see app.css, makes a
+   * <col>'s specified width authoritative, unlike a <tr>'s height, which
+   * is only ever a floor) -- but the sticky row-header column (table.grid
+   * tbody th { left: 0 }) has the exact same "geometrically inside the
+   * container, but actually covered by a pinned element" problem the
+   * sticky thead has for rows, so this still needs its own correction
+   * pass for that (_correctColScrollForStickyHeader). */
+  _scrollColIntoView(col, span = 1) {
+    if (!this.container) return;
+    const colLefts = this._colLefts();
+    const left = colLefts[col];
+    const right = colLefts[Math.min(this.cols, col + span)];
+    const viewLeft = this.container.scrollLeft;
+    const viewW = this.container.clientWidth;
+    let next = null;
+    if (left < viewLeft) next = left;
+    else if (right > viewLeft + viewW) next = Math.max(0, right - viewW);
+    if (next !== null && next !== viewLeft) {
+      this.container.scrollLeft = next;
+      this._renderWindow();
+    }
+    this._correctColScrollForStickyHeader(col, span);
+  }
+
+  /** Sticky-row-header-column counterpart of _correctRowScrollForRealHeight
+   * -- see there. Column headers (thead th) are never windowed (see
+   * _build()), so `this._colHeaderElements[col]` is always a real,
+   * correctly-positioned element regardless of scroll -- no need to wait
+   * for a remount the way the row version does. */
+  _correctColScrollForStickyHeader(col, span = 1) {
+    if (!this.container || !this.table) return;
+    const startTh = this._colHeaderElements[col];
+    const endTh = this._colHeaderElements[Math.min(this.cols, col + span) - 1] || startTh;
+    if (!startTh || !endTh) return;
+    const containerRect = this.container.getBoundingClientRect();
+    const rowHeaderTh = this.table.querySelector('tbody th') || this.table.querySelector('thead th');
+    const stickyLeftWidth = rowHeaderTh ? rowHeaderTh.getBoundingClientRect().width : ROW_HEADER_WIDTH;
+    const stickyLeft = containerRect.left + stickyLeftWidth;
+    const startRect = startTh.getBoundingClientRect();
+    const endRect = endTh.getBoundingClientRect();
+    let delta = 0;
+    if (startRect.left < stickyLeft) delta = startRect.left - stickyLeft;
+    else if (endRect.right > containerRect.right) delta = endRect.right - containerRect.right;
+    if (delta) {
+      this.container.scrollLeft = Math.max(0, this.container.scrollLeft + delta);
+      this._renderWindow();
+    }
+  }
+
   /** Largest index i (0 <= i < count) such that offsets[i] <= x -- i.e. the
    * row/column whose pixel range contains position x. `offsets` is one of
    * _rowTops()/_colLefts()'s arrays (length count+1, strictly
@@ -1023,6 +1191,30 @@ export class Grid {
     else this.table.appendChild(tbody);
     this._tbody = tbody;
 
+    // A live row-resize drag (_onResizeMove/_resizing) holds a direct
+    // reference to the <tr> it's dragging -- if a scroll-driven remount
+    // just replaced that node (this method just discarded the whole old
+    // <tbody>), the drag's `el` is now a detached, orphaned node: further
+    // live-height writes during the drag would silently apply to nothing
+    // visible. Rebind to the freshly-mounted <tr> for the same row (if
+    // it's still in the window) and reapply whatever live size the drag
+    // was already showing, so the resize continues seamlessly instead of
+    // visually freezing. If the row scrolled fully out of the new window,
+    // there's genuinely no handle for it any more -- `el` stays stale, but
+    // _onResizeEnd still commits the correct final size from `key`/
+    // `liveSize` regardless of DOM state, so the actual data-level result
+    // is unaffected either way.
+    if (this._resizing && this._resizing.kind === 'row') {
+      const idx = Number(this._resizing.key) - 1;
+      const newEl = this._rowElements[idx];
+      if (newEl) {
+        this._resizing.el = newEl;
+        const liveSize = this._resizing.liveSize !== undefined ? this._resizing.liveSize : this._resizing.startSize;
+        newEl.style.height = liveSize + 'px';
+        this._syncRowCellHeights(newEl, liveSize);
+      }
+    }
+
     this._renderAll(); // fill in content for whatever's now mounted
 
     // The DOM nodes backing the selection are entirely new -- state
@@ -1062,6 +1254,91 @@ export class Grid {
       this._scrollRafPending = false;
       this._renderWindow();
     });
+  }
+
+  /** Starts the drag-select auto-scroll interval if not already running --
+   * see _dragAutoScrollTick's doc comment for why this is interval-driven
+   * rather than purely mousemove/touchmove-driven. Called from every
+   * drag-start site (_onMouseDown, _onRowHeaderMouseDown/
+   * _onColHeaderMouseDown, the touch drag-arm timer in
+   * _armTouchDragCandidate). */
+  _startDragAutoScroll() {
+    if (this._dragAutoScrollTimer) return;
+    this._dragAutoScrollTimer = setInterval(() => this._dragAutoScrollTick(), 50);
+  }
+
+  /** Stops the drag-select auto-scroll interval -- called from every
+   * drag-end site (_onMouseUp, _onTouchEnd). Safe to call when not running. */
+  _stopDragAutoScroll() {
+    if (this._dragAutoScrollTimer) {
+      clearInterval(this._dragAutoScrollTimer);
+      this._dragAutoScrollTimer = null;
+    }
+    this._lastPointerXY = null;
+  }
+
+  /**
+   * Nudges the scroll container toward the pointer whenever an active
+   * drag-select (plain cell range, or whole-row/whole-column header range)
+   * is held near a viewport edge -- standard spreadsheet-app behavior
+   * (Excel/Sheets both do this), and a real requirement under windowing:
+   * without it, a drag can never reach a row/column outside the current
+   * render window at all, since the window otherwise only ever moves via
+   * an explicit user scroll gesture, which a held mouse-button drag can't
+   * also perform at the same time.
+   *
+   * Runs on a plain interval (_startDragAutoScroll), not directly off
+   * mousemove/touchmove -- mousemove stops firing entirely once the
+   * pointer itself stops moving, so a pointer deliberately held still at
+   * the very edge (the normal way to trigger this in every spreadsheet
+   * app) would otherwise never advance. `_lastPointerXY` (kept fresh by
+   * every mousemove/touchmove during a drag) is what this reads instead of
+   * an event.
+   *
+   * After actually moving the scroll position, re-renders the window
+   * immediately (not waiting for the container's async 'scroll' event +
+   * _onScroll's rAF throttle) and re-resolves the selection at the last
+   * known pointer position via elementFromPoint -- the pointer itself
+   * hasn't moved, but the DOM under it has (a previously off-screen row/
+   * column may now be mounted), so the drag has to re-hit-test rather than
+   * wait for the next real mousemove/touchmove (which may never come if
+   * the pointer stays perfectly still at the edge).
+   */
+  _dragAutoScrollTick() {
+    if (!this._dragging && !this._headerDragging) { this._stopDragAutoScroll(); return; }
+    const xy = this._lastPointerXY;
+    if (!xy || !this.container) return;
+    const rect = this.container.getBoundingClientRect();
+    const margin = 36;
+    const step = 22;
+    let dy = 0, dx = 0;
+    if (xy.y < rect.top + margin) dy = -step;
+    else if (xy.y > rect.bottom - margin) dy = step;
+    if (xy.x < rect.left + margin) dx = -step;
+    else if (xy.x > rect.right - margin) dx = step;
+    if (!dx && !dy) return;
+    const prevTop = this.container.scrollTop;
+    const prevLeft = this.container.scrollLeft;
+    this.container.scrollTop = Math.max(0, prevTop + dy);
+    this.container.scrollLeft = Math.max(0, prevLeft + dx);
+    if (this.container.scrollTop === prevTop && this.container.scrollLeft === prevLeft) return; // already at a scroll limit
+    this._renderWindow();
+    const el = document.elementFromPoint(xy.x, xy.y);
+    if (!el) return;
+    if (this._headerDragging === 'row') {
+      const th = el.closest('tbody th');
+      if (th && th.dataset.rowIndex !== undefined) this.selectWholeRow(Number(th.dataset.rowIndex), true);
+    } else if (this._headerDragging === 'col') {
+      const th = el.closest('thead th');
+      if (th && th.dataset.colIndex !== undefined) this.selectWholeColumn(Number(th.dataset.colIndex), true);
+    } else if (this._dragging) {
+      const td = el.closest('td');
+      if (td && td.dataset.ref && td.dataset.ref !== this.selected) {
+        this.selected = td.dataset.ref;
+        this._highlightRange(this.anchor, this.selected);
+        if (this.onSelectionChange) this.onSelectionChange(this.selected);
+      }
+    }
   }
 
   _renderCell(ref) {
@@ -1365,10 +1642,16 @@ export class Grid {
     // handling below is what should happen instead.
     e.preventDefault();
     this._dragging = true;
+    this._lastPointerXY = { x: e.clientX, y: e.clientY };
+    this._startDragAutoScroll();
     this._select(td.dataset.ref, e.shiftKey);
   }
 
   _onMouseMoveDrag(e) {
+    // Kept fresh on every drag-relevant move regardless of which branch
+    // below actually applies -- _dragAutoScrollTick (see there) reads this
+    // on an interval, independent of whether mousemove itself keeps firing.
+    if (this._dragging || this._headerDragging) this._lastPointerXY = { x: e.clientX, y: e.clientY };
     // Dragging across row/col headers (started by _onRowHeaderMouseDown/
     // _onColHeaderMouseDown below) extends a whole-row/whole-column
     // selection instead of the plain cell-range drag below -- same
@@ -1395,11 +1678,13 @@ export class Grid {
   _onMouseUp() {
     if (this._headerDragging) {
       this._headerDragging = null;
+      this._stopDragAutoScroll();
       this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
       return;
     }
     if (!this._dragging) return;
     this._dragging = false;
+    this._stopDragAutoScroll();
     this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
   }
 
@@ -1517,6 +1802,11 @@ export class Grid {
     const lastCol = colLetter(this.cols - 1);
     this.anchor = 'A' + (this._headerAnchorRow + 1);
     this.selected = lastCol + (rowIndex + 1);
+    // Vertical scroll only -- `this.selected` here is the far-right column
+    // of the row, not a meaningful horizontal target (a whole-row selection
+    // has no single "correct" horizontal scroll position); `rowIndex` is
+    // what actually needs to be visible.
+    this._scrollRowIntoView(rowIndex);
     this._highlightRange(this.anchor, this.selected);
     if (this.onSelectionChange) this.onSelectionChange(this.selected);
   }
@@ -1528,6 +1818,9 @@ export class Grid {
     }
     this.anchor = colLetter(this._headerAnchorCol) + '1';
     this.selected = colLetter(colIndex) + this.rows;
+    // Horizontal scroll only -- see selectWholeRow's comment above (same
+    // reasoning, transposed).
+    this._scrollColIntoView(colIndex);
     this._highlightRange(this.anchor, this.selected);
     if (this.onSelectionChange) this.onSelectionChange(this.selected);
   }
@@ -1536,6 +1829,8 @@ export class Grid {
     if (e.button !== 0) return; // right-click is handled by _onContextMenu, don't also start a drag-select
     e.preventDefault();
     this._headerDragging = 'row';
+    this._lastPointerXY = { x: e.clientX, y: e.clientY };
+    this._startDragAutoScroll();
     this.selectWholeRow(rowIndex, e.shiftKey);
   }
 
@@ -1543,6 +1838,8 @@ export class Grid {
     if (e.button !== 0) return;
     e.preventDefault();
     this._headerDragging = 'col';
+    this._lastPointerXY = { x: e.clientX, y: e.clientY };
+    this._startDragAutoScroll();
     this.selectWholeColumn(colIndex, e.shiftKey);
   }
 
@@ -1597,6 +1894,8 @@ export class Grid {
       const c = this._touchDragCandidate;
       if (!c) return;
       c.armed = true;
+      this._lastPointerXY = { x: c.x, y: c.y };
+      this._startDragAutoScroll();
       if (c.kind === 'cell') {
         this._dragging = true;
         this._select(c.ref, false);
@@ -1699,6 +1998,7 @@ export class Grid {
     // behavior rather than also popping the context menu.
     clearTimeout(this._touchLongPressTimer);
     e.preventDefault();
+    this._lastPointerXY = { x: touch.clientX, y: touch.clientY };
     const el = document.elementFromPoint(touch.clientX, touch.clientY);
     if (!el) return;
     if (c.kind === 'row') {
@@ -1737,6 +2037,7 @@ export class Grid {
     const c = this._touchDragCandidate;
     this._touchDragCandidate = null;
     if (!c || !c.armed) return;
+    this._stopDragAutoScroll();
     if (this._headerDragging) {
       this._headerDragging = null;
       this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
@@ -1775,6 +2076,13 @@ export class Grid {
     if (this.editingInput) this._commitEdit();
     this.anchor = extend && this.anchor ? this.anchor : ref;
     this.selected = ref;
+    // Scroll BEFORE highlighting -- a newly-selected ref reached via
+    // keyboard traversal (_moveSelection) or programmatic selection
+    // (_onContainerFocus) is routinely off-screen under windowing, with no
+    // live <td> yet; _scrollRefIntoView mounts it (via _renderWindow) if a
+    // scroll was actually needed, so _highlightRange right after has a
+    // real element to add .selected to instead of silently no-op'ing.
+    this._scrollRefIntoView(ref);
     this._highlightRange(this.anchor, this.selected);
     this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref } }));
     if (this.onSelectionChange) this.onSelectionChange(ref);
