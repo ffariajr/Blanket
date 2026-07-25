@@ -51,6 +51,17 @@ export class TabSocket {
     this.ws = null;
     this.connected = false;
     this._pendingPatch = null;
+    // Accumulates every structuralOp passed to queueEdit since the last
+    // flush (see grid.js's Grid.onChange doc comment for what one of these
+    // looks like) -- ordinarily at most one entry (a single insert/delete
+    // between debounce windows), but kept as an array rather than
+    // overwriting so two rapid structural edits inside one debounce window
+    // both survive to be replayed, in order, by a remote applyRemote (see
+    // its structural branch). Sent as `structuralOps`, a SIBLING of
+    // `payload` on the wire (never merged into it) -- see ws-server/
+    // session.py's handle_new_edit -- so it's purely a live-relay hint,
+    // never persisted into the document itself.
+    this._pendingStructuralOps = [];
     this._editTimer = null;
     this._lastKeystrokeSent = 0;
     this._lastActiveSent = null; // null until the first send, so the first real state always goes out even if it's `false`
@@ -96,7 +107,7 @@ export class TabSocket {
           this.onState(msg.data, msg.sequence);
           break;
         case 'new_edit':
-          this.onRemoteEdit(msg.payload, msg.from);
+          this.onRemoteEdit(msg.payload, msg.from, msg.structuralOps);
           break;
         case 'keystroke':
           this.onRemoteKeystroke(msg.payload, msg.from);
@@ -144,9 +155,13 @@ export class TabSocket {
   }
 
   // Groups edits client-side before sending, per the earlier design --
-  // debounced merge patch, not one message per keystroke.
-  queueEdit(patch) {
+  // debounced merge patch, not one message per keystroke. `structuralOp`
+  // (see grid.js's Grid.onChange doc comment) is present only when `patch`
+  // came from a local insert/delete row/column -- queued separately (never
+  // merged into `patch`) so it rides the wire as its own sibling field.
+  queueEdit(patch, structuralOp) {
     this._pendingPatch = mergePatchInto(this._pendingPatch || {}, patch);
+    if (structuralOp) this._pendingStructuralOps.push(structuralOp);
     if (this._editTimer) clearTimeout(this._editTimer);
     this._editTimer = setTimeout(() => this._flushEdit(), EDIT_DEBOUNCE_MS);
   }
@@ -214,8 +229,16 @@ export class TabSocket {
       this.onFlushFailed(this._pendingPatch);
       return;
     }
-    this._send({ type: 'new_edit', payload: this._pendingPatch });
+    const msg = { type: 'new_edit', payload: this._pendingPatch };
+    // Only included when non-empty -- keeps the wire message identical to
+    // before this existed for the (overwhelmingly common) non-structural
+    // case, and lets an older server ignore it fine either way (it's a
+    // sibling of `payload`, never merged into the persisted document -- see
+    // ws-server/session.py's handle_new_edit).
+    if (this._pendingStructuralOps.length) msg.structuralOps = this._pendingStructuralOps;
+    this._send(msg);
     this._pendingPatch = null;
+    this._pendingStructuralOps = [];
   }
 
   _send(obj) {

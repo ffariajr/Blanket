@@ -153,11 +153,19 @@ export class Grid {
    *   override). cols/rows are the grid's actual dimensions -- falls back
    *   to LEGACY_COLS/LEGACY_ROWS if absent (a document saved before this
    *   feature existed).
-   * @param {(patch: object) => void} opts.onChange called with a
-   *   full-document-shaped merge patch (e.g. {cells: {...}} or
-   *   {columnWidths: {...}}) on any local edit -- this is the wire shape
-   *   ws-server/merge_patch.py expects, and the ONLY place that shape is
-   *   assembled, so callers (app.js) never need to know about it.
+   * @param {(patch: object, structuralOp?: {dimension: 'row'|'col',
+   *   boundaryIndex: number, count: number, isInsert: boolean}) => void}
+   *   opts.onChange called with a full-document-shaped merge patch (e.g.
+   *   {cells: {...}} or {columnWidths: {...}}) on any local edit -- this is
+   *   the wire shape ws-server/merge_patch.py expects, and the ONLY place
+   *   that shape is assembled, so callers (app.js) never need to know about
+   *   it. The second argument is present ONLY for a local insert/delete row/
+   *   column (from _transformStructure) -- app.js/ws.js thread it through as
+   *   a sibling of the merge-patch payload (never merged into the patch
+   *   itself, so it's never persisted into the document) purely so OTHER
+   *   connected viewers' applyRemote() can remap their own scroll anchor by
+   *   the same boundaryIndex/count/isInsert the LOCAL editor used -- see
+   *   applyRemote's structural branch and _remapStructuralIndex.
    * @param {boolean} opts.readOnly
    * @param {(fields: Array<{infoType: string, value: string}>) =>
    *   Promise<Record<string,string>|null>} [opts.onNeedUserInfo] called by
@@ -365,17 +373,30 @@ export class Grid {
    * patch whose value touches `merge` forces a structural rebuild (the
    * table's actual TD layout depends on which cells are merge-covered);
    * anything else updates in place.
+   *
+   * @param {object} patch
+   * @param {Array<{dimension: 'row'|'col', boundaryIndex: number, count:
+   *   number, isInsert: boolean}>} [structuralOps] -- riding alongside
+   *   `patch` as a sibling on the WS message (see ws.js/ws-server's
+   *   session.py -- never merged into `patch` itself, so it never touches
+   *   the persisted document), present only when this patch came from one
+   *   or more local _transformStructure() calls (insert/delete row/column)
+   *   on the SENDING client. Used below to remap THIS viewer's own scroll
+   *   anchor by the same boundaryIndex/count/isInsert the sender's local
+   *   _transformStructure used on itself -- see the `structural` branch.
    */
-  applyRemote(patch) {
+  applyRemote(patch, structuralOps) {
     // Captured unconditionally, before anything below might mutate
     // this.cells/rows/cols -- cheap, and only actually used if this patch
     // turns out to force a structural rebuild (see the `structural` branch
     // at the bottom) -- a remote collaborator's insert/delete/merge must
     // not scroll every OTHER connected viewer back to the top of their own
-    // scrolled-down view. No index remap on restore: a remote patch here
-    // doesn't expose the boundaryIndex/count/isInsert a local
-    // _transformStructure has, so the same row/col index is used as-is
-    // (still far better than snapping to 0,0).
+    // scrolled-down view. If `structuralOps` is present (a remote
+    // insert/delete), the captured rowIndex/colIndex is remapped by it
+    // below, exactly like a local _transformStructure remaps its own
+    // scrollAnchor -- otherwise (remote merge/unmerge, or any other
+    // structural patch that doesn't renumber rows/columns) the plain
+    // captured index is already correct, same as before.
     const scrollAnchor = this._captureScrollAnchor();
     let structural = false;
     let changedRefs = null;
@@ -444,7 +465,27 @@ export class Grid {
     }
     if (structural) {
       this._build();
-      this._restoreScrollAnchor(scrollAnchor);
+      // Remap the captured anchor by every structural op included on this
+      // patch (ordinarily exactly one -- see queueEdit/_flushEdit's doc
+      // comment for the rare multi-op-before-flush case), same rule as
+      // _transformStructure's own remapIndex. Absent/empty (merge/unmerge,
+      // or a patch from a pre-this-fix sender) leaves rowIndex/colIndex
+      // undefined, so _restoreScrollAnchor falls back to the plain
+      // captured index, matching the previous (pre-fix) behavior.
+      let newRowIndex, newColIndex;
+      if (scrollAnchor && Array.isArray(structuralOps)) {
+        newRowIndex = scrollAnchor.rowIndex;
+        newColIndex = scrollAnchor.colIndex;
+        for (const op of structuralOps) {
+          if (!op) continue;
+          if (op.dimension === 'row') {
+            newRowIndex = this._remapStructuralIndex(newRowIndex, op.boundaryIndex, op.count, op.isInsert);
+          } else if (op.dimension === 'col') {
+            newColIndex = this._remapStructuralIndex(newColIndex, op.boundaryIndex, op.count, op.isInsert);
+          }
+        }
+      }
+      this._restoreScrollAnchor(scrollAnchor, newRowIndex, newColIndex);
     } else if (changedRefs) {
       // Structural changes already re-render every mounted cell via
       // _build()'s fresh _renderWindow() mount -- only the non-structural
@@ -975,6 +1016,25 @@ export class Grid {
     this.container.scrollTop = Math.max(0, rowTops[row] + anchor.rowOffsetPx);
     this.container.scrollLeft = Math.max(0, colLefts[col] + anchor.colOffsetPx);
     this._renderWindow();
+  }
+
+  /**
+   * Maps a pre-shift row/col index to its post-shift equivalent for a
+   * single insert/delete at `boundaryIndex` (count `count`) -- shared by
+   * _transformStructure (remapping the LOCAL editor's own scroll anchor)
+   * and applyRemote's structural branch (remapping every OTHER connected
+   * viewer's scroll anchor for a REMOTE insert/delete -- see applyRemote's
+   * doc comment for how the boundaryIndex/count/isInsert triple gets from
+   * the sender to here over the wire). Insert: shift by `count` if at/after
+   * the boundary. Delete: shift back by `count` if entirely past the
+   * deleted range, or clamp to the boundary itself if it fell inside the
+   * deleted range (whatever now occupies that position).
+   */
+  _remapStructuralIndex(idx, boundaryIndex, count, isInsert) {
+    if (isInsert) return idx >= boundaryIndex ? idx + count : idx;
+    if (idx >= boundaryIndex + count) return idx - count;
+    if (idx >= boundaryIndex) return boundaryIndex;
+    return idx;
   }
 
   /**
@@ -3151,12 +3211,7 @@ export class Grid {
     // on the SAME content, not just the same raw pixel offset (which would
     // now show different rows/columns after the shift).
     const scrollAnchor = this._captureScrollAnchor();
-    const remapIndex = (idx) => {
-      if (isInsert) return idx >= boundaryIndex ? idx + count : idx;
-      if (idx >= boundaryIndex + count) return idx - count;
-      if (idx >= boundaryIndex) return boundaryIndex; // was inside the deleted range -- clamp to whatever now occupies that boundary
-      return idx;
-    };
+    const remapIndex = (idx) => this._remapStructuralIndex(idx, boundaryIndex, count, isInsert);
     const newCells = {};
     for (const [ref, cell] of Object.entries(this.cells)) {
       const p = parseRef(ref);
@@ -3272,7 +3327,12 @@ export class Grid {
     this.selected = null;
     this._headerAnchorRow = null;
     this._headerAnchorCol = null;
-    this.onChange(patch);
+    // Second arg: see applyRemote's doc comment -- ws.js/ws-server thread
+    // this through as a sibling of the merge-patch payload (never merged
+    // into it, never persisted) purely so every OTHER connected viewer's
+    // applyRemote() can remap ITS OWN scroll anchor the same way this
+    // (the local, sending) client remaps its own scrollAnchor right below.
+    this.onChange(patch, { dimension, boundaryIndex, count, isInsert });
     this._build();
     const newRowIndex = scrollAnchor && dimension === 'row' ? remapIndex(scrollAnchor.rowIndex) : undefined;
     const newColIndex = scrollAnchor && dimension === 'col' ? remapIndex(scrollAnchor.colIndex) : undefined;

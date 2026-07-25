@@ -566,8 +566,8 @@ async function renderSheet(spreadsheetId, tabId) {
     // invisible to the app, which only ever reads data.cells). Never
     // caught before because the WS server isn't wired through Apache in
     // production yet.
-    onChange: (patch) => {
-      socket.queueEdit(patch);
+    onChange: (patch, structuralOp) => {
+      socket.queueEdit(patch, structuralOp);
       localSaveFallbackTimer();
     },
     onNeedUserInfo: showUserInfoPrompt,
@@ -837,7 +837,7 @@ async function renderSheet(spreadsheetId, tabId) {
     onState: (data) => {
       grid.setDocument(data || { cells: {} });
     },
-    onRemoteEdit: (patch) => grid.applyRemote(patch),
+    onRemoteEdit: (patch, from, structuralOps) => grid.applyRemote(patch, structuralOps),
     onRemoteKeystroke: () => {
       /* could show a "someone is typing" indicator; kept minimal */
     },

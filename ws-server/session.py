@@ -293,7 +293,7 @@ class TabSession:
         except Exception:
             logger.exception("congestion_promote send failed, dropping client")
 
-    async def handle_new_edit(self, ws, payload):
+    async def handle_new_edit(self, ws, payload, structural_ops=None):
         from merge_patch import apply_merge_patch
 
         client = self.clients[ws]
@@ -318,11 +318,21 @@ class TabSession:
         # BUGS_FOUND.md [001]). grid.js's applyRemote() is idempotent
         # against a client re-receiving its own already-applied patch, so
         # this is safe for the common (non-racing) case too.
-        await self._broadcast_all({
+        message = {
             "type": "new_edit",
             "from": self._sender_info(client),
             "payload": payload,
-        })
+        }
+        # `structural_ops` (see server.py's wire-protocol docstring) is a
+        # pure live-relay hint -- a sibling of `payload`, deliberately never
+        # passed through apply_merge_patch/self.data above, so it never
+        # touches the persisted document. Only included on the rebroadcast
+        # when the sender actually sent one (a local insert/delete), so a
+        # client that doesn't understand it (or an older build) sees exactly
+        # the same message shape as before this existed.
+        if structural_ops:
+            message["structuralOps"] = structural_ops
+        await self._broadcast_all(message)
         self._schedule_persist()
 
     async def handle_keystroke(self, ws, payload):
