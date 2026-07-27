@@ -27,10 +27,25 @@ Client -> server, after hello:
     Ephemeral relay only -- rebroadcast verbatim to other clients on this
     tab_id, never touches the document or the database. Rejected (silently
     dropped) from view-only clients.
-  {"type": "new_edit", "payload": <JSON Merge Patch, RFC 7396>}
-    Applied to the in-memory document immediately, then rebroadcast to
-    other clients, independent of persistence timing. Rejected (with an
-    "error" reply) from view-only clients.
+  {"type": "new_edit", "payload": <JSON Merge Patch, RFC 7396>,
+   "structuralOps": [{"dimension": "row"|"col", "boundaryIndex": N,
+     "count": N, "isInsert": true|false}, ...]}
+    `payload` is applied to the in-memory document immediately, then
+    rebroadcast to other clients, independent of persistence timing.
+    Rejected (with an "error" reply) from view-only clients.
+    `structuralOps` is OPTIONAL and, when present, describes zero or more
+    local row/column insert/delete operations the sender's own
+    Grid._transformStructure just performed (assets/js/grid.js) -- purely a
+    live-relay hint, exactly like `keystroke`'s payload: it rides ALONGSIDE
+    `payload` (never merged into it, never touches `self.data`/the
+    persisted document) and exists only so a receiving client's
+    Grid.applyRemote() can remap ITS OWN scroll anchor by the same
+    boundaryIndex/count/isInsert the sender used on its own -- see
+    assets/js/grid.js's Grid.onChange doc comment and applyRemote's
+    structural branch for why: without this, every OTHER connected viewer
+    kept the same numeric scroll position across a remote insert/delete,
+    but the row/column now rendered there had silently shifted underneath
+    it.
   {"type": "save"}
     Forces an immediate persist if the document has unsaved changes.
   {"type": "presence_active", "active": true|false}
@@ -47,8 +62,11 @@ Client -> server, after hello:
 Server -> client:
   {"type": "state", "sequence": N, "data": {...}}
     Sent once, right after hello: the tab's current full document.
-  {"type": "new_edit", "from": {"user_id":.., "name":".."}, "payload": {...}}
-    Another client's edit, relayed.
+  {"type": "new_edit", "from": {"user_id":.., "name":".."}, "payload": {...},
+   "structuralOps": [...]}
+    Another client's edit, relayed. `structuralOps` (see the client->server
+    "new_edit" entry above) is included verbatim, only when the sender's
+    message included it.
   {"type": "keystroke", "from": {...}, "payload": {...}}
     Another client's keystroke event, relayed.
   {"type": "saved", "sequence": N}
@@ -190,7 +208,9 @@ async def handle_connection(websocket):
 
             msg_type = message.get("type")
             if msg_type == "new_edit":
-                await session.handle_new_edit(websocket, message.get("payload", {}))
+                await session.handle_new_edit(
+                    websocket, message.get("payload", {}), message.get("structuralOps")
+                )
             elif msg_type == "keystroke":
                 await session.handle_keystroke(websocket, message.get("payload", {}))
             elif msg_type == "save":

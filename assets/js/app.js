@@ -566,8 +566,8 @@ async function renderSheet(spreadsheetId, tabId) {
     // invisible to the app, which only ever reads data.cells). Never
     // caught before because the WS server isn't wired through Apache in
     // production yet.
-    onChange: (patch) => {
-      socket.queueEdit(patch);
+    onChange: (patch, structuralOp) => {
+      socket.queueEdit(patch, structuralOp);
       localSaveFallbackTimer();
     },
     onNeedUserInfo: showUserInfoPrompt,
@@ -657,6 +657,12 @@ async function renderSheet(spreadsheetId, tabId) {
   // DOM-level highlighting renderRemoteSelections() applies directly to
   // cells (see Grid.onRebuild's doc comment in grid.js).
   grid.onRebuild = () => renderRemoteSelections();
+  // Scroll-driven remounts (see Grid.onWindowChange's doc comment) replace
+  // the windowed <tbody> the exact same way a structural rebuild replaces
+  // the whole <table> -- a remote collaborator's selection highlight on a
+  // cell has to be reapplied here too, not just on a structural change, or
+  // scrolling a highlighted cell off-screen and back would show it plain.
+  grid.onWindowChange = () => renderRemoteSelections();
 
   // tab_id -> its .tab-presence-dots element, so renderPresence() can
   // refill each tab's dots without rebuilding the whole nav on every
@@ -831,7 +837,7 @@ async function renderSheet(spreadsheetId, tabId) {
     onState: (data) => {
       grid.setDocument(data || { cells: {} });
     },
-    onRemoteEdit: (patch) => grid.applyRemote(patch),
+    onRemoteEdit: (patch, from, structuralOps) => grid.applyRemote(patch, structuralOps),
     onRemoteKeystroke: () => {
       /* could show a "someone is typing" indicator; kept minimal */
     },

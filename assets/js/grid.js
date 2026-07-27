@@ -109,6 +109,39 @@ const ROW_HEADER_WIDTH = 40;
 const MIN_COLS = 1;
 const MIN_ROWS = 1;
 
+// --- Virtualization (windowed rendering) ------------------------------
+// Only rows/columns within the visible range +/- a buffer get real
+// <tr>/<td> nodes (see _computeVisibleWindow/_renderWindow) -- everything
+// else is represented by one spacer <tr>/<td> per side, sized to occupy
+// the same total pixel space the skipped rows/columns would have taken,
+// so the scroll container's scrollable size/position stays correct. The
+// buffer is a FRACTION of the current viewport size (floored at the *_PX
+// minimums below) rather than a fixed row/column count -- it needs to
+// survive a fast scroll/fling without a visible blank flash regardless of
+// how small rowHeights/columnWidths happen to be, and a fixed pixel
+// buffer scales naturally with viewport size for that (a bigger viewport
+// scrolls faster in practice, roughly speaking, so it gets a bigger
+// buffer too).
+const MIN_ROW_BUFFER_PX = 150;
+const MIN_COL_BUFFER_PX = 150;
+const BUFFER_VIEWPORT_FRACTION = 0.15;
+// The raw visible+buffer range (see _computeVisibleWindow) shifts by a row
+// or two on nearly every scroll event during a real, continuous scroll
+// gesture -- rebuilding the whole windowed <tbody> that often (even though
+// each individual rebuild is itself cheap and bounded) adds up to real
+// scroll jank, confirmed by profiling this exact scenario (see this
+// commit's perf write-up). Snapping the window's start/end to a coarse
+// row/column "chunk" grid (rounding the start down and the end up to the
+// nearest chunk boundary) means the actually-rendered window only changes
+// once scrolling crosses a whole chunk, cutting rebuild frequency by
+// roughly ROW_CHUNK/COL_CHUNK-fold for a modest, still-bounded increase in
+// how many rows/columns stay mounted at once. Snapping only ever WIDENS
+// the raw range (floor down, ceil up), never narrows it, so it can't
+// undo the buffer's or the merge-safety expansion's coverage guarantees --
+// safe to apply as the last step.
+const ROW_CHUNK = 32;
+const COL_CHUNK = 16;
+
 export { colLetter };
 
 export class Grid {
@@ -120,11 +153,19 @@ export class Grid {
    *   override). cols/rows are the grid's actual dimensions -- falls back
    *   to LEGACY_COLS/LEGACY_ROWS if absent (a document saved before this
    *   feature existed).
-   * @param {(patch: object) => void} opts.onChange called with a
-   *   full-document-shaped merge patch (e.g. {cells: {...}} or
-   *   {columnWidths: {...}}) on any local edit -- this is the wire shape
-   *   ws-server/merge_patch.py expects, and the ONLY place that shape is
-   *   assembled, so callers (app.js) never need to know about it.
+   * @param {(patch: object, structuralOp?: {dimension: 'row'|'col',
+   *   boundaryIndex: number, count: number, isInsert: boolean}) => void}
+   *   opts.onChange called with a full-document-shaped merge patch (e.g.
+   *   {cells: {...}} or {columnWidths: {...}}) on any local edit -- this is
+   *   the wire shape ws-server/merge_patch.py expects, and the ONLY place
+   *   that shape is assembled, so callers (app.js) never need to know about
+   *   it. The second argument is present ONLY for a local insert/delete row/
+   *   column (from _transformStructure) -- app.js/ws.js thread it through as
+   *   a sibling of the merge-patch payload (never merged into the patch
+   *   itself, so it's never persisted into the document) purely so OTHER
+   *   connected viewers' applyRemote() can remap their own scroll anchor by
+   *   the same boundaryIndex/count/isInsert the LOCAL editor used -- see
+   *   applyRemote's structural branch and _remapStructuralIndex.
    * @param {boolean} opts.readOnly
    * @param {(fields: Array<{infoType: string, value: string}>) =>
    *   Promise<Record<string,string>|null>} [opts.onNeedUserInfo] called by
@@ -152,6 +193,13 @@ export class Grid {
     this.editingInput = null;
     this._dragging = false;
     this._headerDragging = null; // 'row'|'col'|null -- see _onRowHeaderMouseDown/_onColHeaderMouseDown
+    // Drag-select auto-scroll state (mouse AND touch, see
+    // _startDragAutoScroll/_dragAutoScrollTick) -- an interval, not just
+    // mousemove-driven, so a pointer held stationary at the viewport edge
+    // still keeps advancing the window (mousemove stops firing once the
+    // pointer itself stops moving).
+    this._dragAutoScrollTimer = null;
+    this._lastPointerXY = null; // {x, y} in viewport (clientX/clientY) coords, updated on every drag-relevant move
     this._touchDragCandidate = null; // {kind, ref|index, x, y, armed} -- see _onTouchStart
     this._touchDragTimer = null;
     this._headerAnchorRow = null; // anchor row/col for a whole-row/column selection -- see selectWholeRow/Column
@@ -165,6 +213,17 @@ export class Grid {
     // directly to cells (e.g. remote-viewer selection highlights) without
     // this hook telling app.js to reapply it after a rebuild.
     this.onRebuild = null;
+    // Set by (future) app.js code: () => void, called every time the
+    // windowed render mounts a different row/column range -- on scroll,
+    // on a container resize, and as part of every _build() too (a
+    // structural rebuild always re-renders the window). Structurally
+    // analogous to onRebuild above, but fires on every remount, not just a
+    // full structural rebuild -- app.js's remote-selection-highlight
+    // reapplication (currently wired only to onRebuild, see there) will
+    // need to also listen here once scrolling alone can change which refs
+    // are mounted without any structural change happening at all. Not
+    // wired to anything yet; existing until the next phase does that.
+    this.onWindowChange = null;
     // In-app clipboard fallback for when the OS Clipboard API is
     // unavailable (non-secure context, permission denied) -- copy/paste
     // still work within the app itself either way.
@@ -206,10 +265,54 @@ export class Grid {
     // over normally.
     this.container.tabIndex = 0;
     this.container.addEventListener('focus', () => this._onContainerFocus());
+    // Tracks the most recent mousedown's button, read by _onContainerFocus
+    // to decide whether to skip its auto-select-first-cell-and-scroll
+    // cascade -- see there. Bound at the container level (not table/
+    // header-specific) so it also sees a right-click landing on a row/col
+    // header BEFORE _onRowHeaderMouseDown/_onColHeaderMouseDown get a
+    // chance to early-return for button!==0 (this needs the raw button,
+    // not whatever those handlers decided to do with it), and fires during
+    // the mousedown's own dispatch -- synchronously before the browser's
+    // default focus-shift action for that same mousedown runs -- so
+    // _onContainerFocus always sees an up-to-date value for the mousedown
+    // that's causing it, never a stale one from some earlier gesture.
+    this.container.addEventListener('mousedown', (e) => {
+      this._lastMouseDownButton = e.button;
+    });
+    // Scroll-driven remount (see _renderWindow): only the row/column range
+    // currently in (or just outside) view has real DOM nodes, so scrolling
+    // has to recompute that range and mount/unmount accordingly.
+    // rAF-throttled in _onScroll so a fast scroll/fling (which can fire
+    // many scroll events per frame on some platforms) recomputes at most
+    // once per paint. Bound once here (like the document-level listeners
+    // above), not in _build() -- this.container persists across rebuilds;
+    // only this.table/this._tbody get replaced.
+    this.container.addEventListener('scroll', () => this._onScroll());
+    // A viewport resize (window resize -- e.g. a mobile orientation change,
+    // or a layout change that grows/shrinks .grid-scroll itself) can
+    // reveal more/less of the sheet with no scroll event firing at all --
+    // recompute the window then too, so a newly-revealed edge isn't blank.
+    window.addEventListener('resize', () => this._renderWindow());
     this._build();
   }
 
   _onContainerFocus() {
+    // A right-click's mousedown can itself cause this focus event -- the
+    // container is the nearest focusable ancestor of a row/col header
+    // <th> (headers aren't focusable themselves), so a right-click on one
+    // shifts focus here exactly like a left-click would. If nothing was
+    // selected yet, the cascade below (_select -> _scrollRefIntoView) used
+    // to run unconditionally between the header's mousedown and its
+    // still-pending contextmenu event -- scrolling/remounting the sheet
+    // out from under the pointer -- so _onContextMenu's hit-test (which
+    // reads e.target/elementFromPoint at contextmenu-dispatch time) landed
+    // on a completely different header than the one actually right-
+    // clicked, and Insert/Delete then silently acted on the wrong row/
+    // column. Skip the cascade entirely for a right-click: _onContextMenu
+    // already resolves its own target straight from the real DOM element
+    // under the pointer and doesn't need a pre-existing selection to do
+    // that correctly, so there's nothing lost by not auto-selecting first.
+    if (this._lastMouseDownButton === 2) return;
     if (this.selected) return;
     const ref = this._firstSelectableRef();
     if (ref) this._select(ref, false);
@@ -246,6 +349,14 @@ export class Grid {
 
   /** Full document replace (e.g. on initial WS "state" message or reload). */
   setDocument(doc) {
+    // Captured before any mutation below so a CSV-import replace (or a WS
+    // reconnect re-fetch) doesn't scroll the user back to the top of a
+    // large sheet they were scrolled down in -- see _captureScrollAnchor's
+    // doc comment for why this can't just be "leave scrollTop alone" under
+    // windowing. No index remap needed on restore (unlike
+    // _transformStructure): this is a wholesale replace, not a row/column
+    // shift, so the same row/col index is still the right place to land.
+    const scrollAnchor = this._captureScrollAnchor();
     doc = doc || {};
     this.cells = doc.cells || {};
     this.columnWidths = doc.columnWidths || {};
@@ -253,6 +364,7 @@ export class Grid {
     this.cols = doc.cols || LEGACY_COLS;
     this.rows = doc.rows || LEGACY_ROWS;
     this._build();
+    this._restoreScrollAnchor(scrollAnchor);
   }
 
   /**
@@ -261,8 +373,31 @@ export class Grid {
    * patch whose value touches `merge` forces a structural rebuild (the
    * table's actual TD layout depends on which cells are merge-covered);
    * anything else updates in place.
+   *
+   * @param {object} patch
+   * @param {Array<{dimension: 'row'|'col', boundaryIndex: number, count:
+   *   number, isInsert: boolean}>} [structuralOps] -- riding alongside
+   *   `patch` as a sibling on the WS message (see ws.js/ws-server's
+   *   session.py -- never merged into `patch` itself, so it never touches
+   *   the persisted document), present only when this patch came from one
+   *   or more local _transformStructure() calls (insert/delete row/column)
+   *   on the SENDING client. Used below to remap THIS viewer's own scroll
+   *   anchor by the same boundaryIndex/count/isInsert the sender's local
+   *   _transformStructure used on itself -- see the `structural` branch.
    */
-  applyRemote(patch) {
+  applyRemote(patch, structuralOps) {
+    // Captured unconditionally, before anything below might mutate
+    // this.cells/rows/cols -- cheap, and only actually used if this patch
+    // turns out to force a structural rebuild (see the `structural` branch
+    // at the bottom) -- a remote collaborator's insert/delete/merge must
+    // not scroll every OTHER connected viewer back to the top of their own
+    // scrolled-down view. If `structuralOps` is present (a remote
+    // insert/delete), the captured rowIndex/colIndex is remapped by it
+    // below, exactly like a local _transformStructure remaps its own
+    // scrollAnchor -- otherwise (remote merge/unmerge, or any other
+    // structural patch that doesn't renumber rows/columns) the plain
+    // captured index is already correct, same as before.
+    const scrollAnchor = this._captureScrollAnchor();
     let structural = false;
     let changedRefs = null;
     if (patch.cells) {
@@ -305,6 +440,17 @@ export class Grid {
       }
       this._applyRowHeights();
     }
+    // A remote width/height change alone (no structural cols/rows change --
+    // that's the `structural` branch below, which already forces a full
+    // _build()) can move the pixel boundaries the currently-rendered
+    // window was computed from (see _computeVisibleWindow) -- e.g. a
+    // spacer row/column's size was computed from the old rowHeights/
+    // columnWidths and is now stale. Cheap to just recompute; avoids a
+    // visible jump the next time this viewer scrolls.
+    if ((patch.columnWidths || patch.rowHeights) && this.table) {
+      this._lastWindow = null;
+      this._renderWindow();
+    }
     // A remote insert/delete row/column changes the grid's own dimensions
     // -- always a structural rebuild (the whole table layout depends on
     // cols/rows, not something _applyColumnWidths/_applyRowHeights's
@@ -319,9 +465,31 @@ export class Grid {
     }
     if (structural) {
       this._build();
+      // Remap the captured anchor by every structural op included on this
+      // patch (ordinarily exactly one -- see queueEdit/_flushEdit's doc
+      // comment for the rare multi-op-before-flush case), same rule as
+      // _transformStructure's own remapIndex. Absent/empty (merge/unmerge,
+      // or a patch from a pre-this-fix sender) leaves rowIndex/colIndex
+      // undefined, so _restoreScrollAnchor falls back to the plain
+      // captured index, matching the previous (pre-fix) behavior.
+      let newRowIndex, newColIndex;
+      if (scrollAnchor && Array.isArray(structuralOps)) {
+        newRowIndex = scrollAnchor.rowIndex;
+        newColIndex = scrollAnchor.colIndex;
+        for (const op of structuralOps) {
+          if (!op) continue;
+          if (op.dimension === 'row') {
+            newRowIndex = this._remapStructuralIndex(newRowIndex, op.boundaryIndex, op.count, op.isInsert);
+          } else if (op.dimension === 'col') {
+            newColIndex = this._remapStructuralIndex(newColIndex, op.boundaryIndex, op.count, op.isInsert);
+          }
+        }
+      }
+      this._restoreScrollAnchor(scrollAnchor, newRowIndex, newColIndex);
     } else if (changedRefs) {
-      // Structural changes already re-render every cell via _build()'s
-      // _renderAll() -- only the non-structural path needs an explicit
+      // Structural changes already re-render every mounted cell via
+      // _build()'s fresh _renderWindow() mount -- only the non-structural
+      // path needs an explicit
       // dependents pass, so a formula cell watching one of these refs
       // (e.g. D1="=B1+C1" watching a remote edit to B1) updates for every
       // connected viewer, not just the one who made the edit.
@@ -389,70 +557,27 @@ export class Grid {
     thead.appendChild(headRow);
     table.appendChild(thead);
 
-    // ref -> td, populated while building so _cellEl() below is an O(1)
-    // Map lookup instead of a querySelector scan. With a fixed 30x100 =
-    // 3000-cell grid and _renderAll() (full re-render, on every structural
-    // rebuild -- merge/unmerge/remote-merge-patch, not just initial load)
-    // calling _cellEl() once per cell, querySelector-per-cell is O(cells²)
-    // work every rebuild -- caught this empirically: harmless-looking in a
-    // real browser at this cell count, but pathologically slow under
-    // jsdom's unindexed selector engine during testing (60s+, not just
-    // "a bit slow"), which is a real cost even if browsers hide it better.
-    this._cellElements = new Map();
+    // Merge origins (cells with cell.merge), precomputed once per
+    // structural rebuild -- _computeVisibleWindow() needs these on every
+    // scroll-driven remount to guarantee a window boundary never lands in
+    // the middle of a merge (see its own doc comment), and rescanning
+    // this.cells for merges on every scroll tick would be needless
+    // repeated work when the set of merges only ever changes on a
+    // structural rebuild anyway.
+    this._mergeOrigins = this._computeMergeOrigins();
 
+    // Real <tr>/<td> nodes only ever exist for the currently-windowed
+    // row/column range now (see _renderWindow) -- _cellElements/
+    // _rowElements/_rowHeaderElements are (re)populated fresh by
+    // _renderWindow on every remount, never populated directly here.
+    // this._tbody is reset to null so the _renderWindow() call below
+    // appends a fresh <tbody> to this new `table` rather than trying to
+    // replace a <tbody> that belonged to the PREVIOUS (now-discarded)
+    // table.
     this._rowElements = [];
     this._rowHeaderElements = [];
-    const tbody = document.createElement('tbody');
-    for (let r = 0; r < this.rows; r++) {
-      const rowNum = r + 1;
-      const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
-      const tr = document.createElement('tr');
-      tr.style.height = rowHeight + 'px';
-      this._rowElements.push(tr);
-      const rowHead = document.createElement('th');
-      rowHead.textContent = String(rowNum);
-      rowHead.dataset.rowIndex = String(r);
-      rowHead.addEventListener('mousedown', (e) => this._onRowHeaderMouseDown(e, r));
-      rowHead.addEventListener('touchstart', (e) => this._onRowHeaderTouchStart(e, r), { passive: true });
-      this._rowHeaderElements.push(rowHead);
-      rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
-      // A <tr height> is only a floor in table layout -- content taller
-      // than it (e.g. a large font-size, see .toolbar's font-size
-      // control) grows the row instead of clipping, which is what
-      // Fernando's "changing font size should not resize cell to fit"
-      // is about. An explicit height + overflow:hidden directly on each
-      // cell (not just the row) is what actually clips oversized
-      // content -- percentage heights inside table cells resolve
-      // inconsistently enough across browsers that hardcoding the real
-      // pixel value here, kept in sync with the row height everywhere it
-      // changes (_applyRowHeights, the live-drag path in _onResizeMove),
-      // is the reliable option. Skipped for a rowSpan>1 origin cell
-      // below -- its natural height is the sum of the rows it spans, not
-      // this one row's height alone.
-      rowHead.style.height = rowHeight + 'px';
-      rowHead.style.overflow = 'hidden';
-      tr.appendChild(rowHead);
-      for (let c = 0; c < this.cols; c++) {
-        const ref = colLetter(c) + rowNum;
-        if (this._coverage.has(ref)) continue; // reserved by an earlier cell's colspan/rowspan
-        const td = document.createElement('td');
-        td.dataset.ref = ref;
-        td.tabIndex = -1;
-        const merge = this.cells[ref] && this.cells[ref].merge;
-        if (merge) {
-          if (merge.cols > 1) td.colSpan = merge.cols;
-          if (merge.rows > 1) td.rowSpan = merge.rows;
-        }
-        if (!merge || !merge.rows || merge.rows <= 1) {
-          td.style.height = rowHeight + 'px';
-          td.style.overflow = 'hidden';
-        }
-        tr.appendChild(td);
-        this._cellElements.set(ref, td);
-      }
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
+    this._cellElements = new Map();
+    this._tbody = null;
     this.container.appendChild(table);
 
     // Selection is driven off mousedown/mousemove/mouseup (drag-to-select
@@ -475,12 +600,29 @@ export class Grid {
     table.addEventListener('touchstart', (e) => this._onTouchStart(e), { passive: true });
     table.addEventListener('touchmove', (e) => this._onTouchMove(e), { passive: false });
 
-    this._renderAll();
+    // Force a fresh window computation -- rows/cols, coverage, and merge
+    // origins may all have just changed, so any window computed before
+    // this rebuild (if any) can't be trusted. This mounts the tbody and
+    // renders its cells' content (see _renderWindow).
+    this._lastWindow = null;
+    this._renderWindow();
 
     // Restore selection across a structural rebuild (merge/unmerge, remote
-    // merge patch, resize) so the user doesn't lose their place.
-    if (prevSelected && this._cellEl(prevSelected)) {
-      this.anchor = prevAnchor && this._cellEl(prevAnchor) ? prevAnchor : prevSelected;
+    // merge patch, resize) so the user doesn't lose their place -- restored
+    // from STATE (prevSelected/prevAnchor captured before this.cells/
+    // this.rows/this.cols above could have changed), not from whether the
+    // previously-selected ref currently has a live DOM node. Under
+    // windowing, a selected cell the user has since scrolled away from is
+    // routinely off-screen (no live node) at the moment some OTHER
+    // collaborator's structural change rebuilds this table -- that must
+    // not silently drop the local selection just because it's not
+    // currently mounted. _refInBounds/_isCovered below still guard against
+    // restoring a ref a structural change (e.g. a remote column delete)
+    // actually removed from the grid entirely; _highlightRange/_cellEl
+    // already tolerate a ref with no live node either way.
+    if (prevSelected && this._refInBounds(prevSelected) && !this._isCovered(prevSelected)) {
+      this.anchor = (prevAnchor && this._refInBounds(prevAnchor) && !this._isCovered(prevAnchor))
+        ? prevAnchor : prevSelected;
       this.selected = prevSelected;
       this._highlightRange(this.anchor, this.selected);
     }
@@ -664,6 +806,18 @@ export class Grid {
     }
   }
 
+  /**
+   * The live <td> for `ref`, or null if it currently has none -- either
+   * because it's merge-covered (never has its own node, see _isCovered),
+   * or because it's outside the currently-rendered window (see
+   * _renderWindow/_computeVisibleWindow) and simply isn't mounted right
+   * now. `this.cells[ref]` (the actual data) is unaffected either way --
+   * a scrolled-off cell's value/format/merge is exactly as real as a
+   * currently-visible one, it just has no DOM node backing it at this
+   * moment. Every caller that reaches into a <td> via this or via
+   * `td.dataset.ref`/`closest('td')` directly has to treat a null/missing
+   * result as "not currently on screen," not "doesn't exist."
+   */
   _cellEl(ref) {
     return this._cellElements.get(ref) || null;
   }
@@ -714,13 +868,1071 @@ export class Grid {
     return !this.container.contains(sel.anchorNode) || !this.container.contains(sel.focusNode);
   }
 
-  _renderAll() {
+  /**
+   * Renders cell CONTENT for exactly the given refs (an iterable of ref
+   * strings) -- called with "every ref newly mounted by the last
+   * _renderWindow() call" (see there and _reconcileWindow's doc comment),
+   * NOT every currently-mounted ref -- that was this method's older,
+   * destroy-and-recreate-everything-every-time behavior (see BUGS_FOUND.md
+   * [021]/[024]'s original write-up, and this commit's own perf write-up for
+   * why that destroy/recreate approach, while bounded and fine in isolation,
+   * turned out to make real integrated scroll performance WORSE than
+   * pre-virtualization master, not better).
+   *
+   * Under the recycling renderer, a ref that was already mounted before this
+   * remount and STAYS mounted keeps whatever content its <td> already has --
+   * nothing about its underlying data could have changed purely from a
+   * scroll. Every OTHER place cell data actually changes (setCellValue,
+   * applyRemote's non-structural branch, _recalcDependents) already calls
+   * _renderCell(ref) directly and immediately for a ref that's mounted at
+   * the time of the change; for one that's unmounted at that moment, the
+   * data (this.cells) is still updated correctly, and the fresh value is
+   * picked up for free the next time this method is called with that ref --
+   * i.e. exactly when it next becomes newly mounted, here.
+   */
+  _renderNewlyMountedRefs(refs) {
+    for (const ref of refs) {
+      if (!this._isCovered(ref)) this._renderCell(ref);
+    }
+  }
+
+  /** List of {ref, row, col, rows, cols} for every merge origin currently
+   * on the sheet -- see _computeVisibleWindow's doc comment for why this
+   * is precomputed once per structural rebuild (_build()) rather than
+   * rescanned on every scroll tick. */
+  _computeMergeOrigins() {
+    const origins = [];
+    for (const [ref, cell] of Object.entries(this.cells)) {
+      if (!cell || !cell.merge) continue;
+      const { row, col } = parseRef(ref);
+      origins.push({ ref, row, col, rows: cell.merge.rows, cols: cell.merge.cols });
+    }
+    return origins;
+  }
+
+  /** Whether `ref` is still a real position in the current
+   * this.rows x this.cols grid -- used when restoring selection across a
+   * structural rebuild (a remote column/row delete can leave a
+   * previously-valid ref out of bounds), independent of whether it
+   * currently has a live DOM node (see _build()'s selection-restore
+   * comment). */
+  _refInBounds(ref) {
+    const p = parseRef(ref);
+    return p.col >= 0 && p.col < this.cols && p.row >= 0 && p.row < this.rows;
+  }
+
+  /** Cumulative pixel offsets: index i -> the top of row i (0-indexed),
+   * index `this.rows` -> total table height. Recomputed fresh on every
+   * call rather than cached -- O(rows), trivial next to the cost of
+   * actually creating/destroying DOM nodes, and this avoids having to
+   * remember to invalidate a cache at every one of the several places
+   * rowHeights can change (live resize drag, remote patch, structural
+   * transform). */
+  _rowTops() {
+    const tops = [0];
     for (let r = 0; r < this.rows; r++) {
-      for (let c = 0; c < this.cols; c++) {
-        const ref = colLetter(c) + (r + 1);
-        if (!this._isCovered(ref)) this._renderCell(ref);
+      tops.push(tops[r] + (this.rowHeights[r + 1] || DEFAULT_ROW_HEIGHT));
+    }
+    return tops;
+  }
+
+  /** Column counterpart of _rowTops -- cumulative left offsets. */
+  _colLefts() {
+    const lefts = [0];
+    for (let c = 0; c < this.cols; c++) {
+      lefts.push(lefts[c] + (this.columnWidths[colLetter(c)] || DEFAULT_COL_WIDTH));
+    }
+    return lefts;
+  }
+
+  /**
+   * Captures enough about the current scroll position to restore it after
+   * a structural rebuild (_build(), via mergeSelection/unmergeSelection/
+   * _transformStructure/applyRemote/setDocument -- see each call site) --
+   * not just the raw scrollTop/scrollLeft pixel values, but the actual
+   * row/column INDEX currently at the top-left of the viewport plus the
+   * exact sub-row/sub-col pixel offset within it.
+   *
+   * The raw pixel values alone aren't enough to restore from, and can't
+   * just be reapplied unchanged after _build() runs: _build() clears
+   * this.container's content (`innerHTML = ''`) and rebuilds it piece by
+   * piece, and _renderWindow() (called partway through, before the tbody
+   * has its full-height spacer rows back) reads this.container.scrollTop/
+   * scrollLeft to compute the window -- at that moment the container is
+   * still nearly empty (just the new, empty colgroup/thead), so the
+   * browser has already clamped scrollTop/scrollLeft down to fit that
+   * tiny transient scrollable range, and that clamp sticks even once the
+   * full-height content is back (confirmed via real-Chromium measurement:
+   * this is exactly why a scrolled-down sheet snapped to the top on every
+   * insert/delete/merge/CSV-import/remote-structural-patch under
+   * virtualization, when pre-virtualization code -- which never reads
+   * scrollTop mid-rebuild -- preserved it for free).
+   *
+   * Capturing the logical row/col index (not just raw pixels) also lets a
+   * caller that's about to renumber rows/columns (_transformStructure)
+   * remap that index to account for the shift before restoring -- see
+   * _restoreScrollAnchor's rowIndex/colIndex params -- so a user scrolled
+   * past an inserted/deleted boundary stays looking at the same actual
+   * content, not just the same raw pixel offset (which would now be
+   * showing different rows/columns entirely).
+   *
+   * Call this BEFORE mutating this.rows/this.cols/this.rowHeights/
+   * this.columnWidths -- it uses their current (pre-mutation) values.
+   */
+  _captureScrollAnchor() {
+    if (!this.container) return null;
+    const rowTops = this._rowTops();
+    const colLefts = this._colLefts();
+    const scrollTop = this.container.scrollTop;
+    const scrollLeft = this.container.scrollLeft;
+    const rowIndex = this._findOffsetIndex(rowTops, scrollTop, this.rows);
+    const colIndex = this._findOffsetIndex(colLefts, scrollLeft, this.cols);
+    return {
+      rowIndex, colIndex,
+      rowOffsetPx: scrollTop - rowTops[rowIndex],
+      colOffsetPx: scrollLeft - colLefts[colIndex],
+    };
+  }
+
+  /**
+   * Restores a scroll anchor captured by _captureScrollAnchor() above --
+   * call once _build() has finished (so the container's full scrollable
+   * size is back and a scrollTop/scrollLeft write here actually sticks,
+   * rather than being immediately clamped away again). `rowIndex`/
+   * `colIndex` override the anchor's own captured index -- pass the
+   * REMAPPED index (see _transformStructure) when a row/column insert or
+   * delete has shifted things around since capture; omit (or pass the
+   * same value) when nothing renumbered (merge/unmerge, a fresh
+   * setDocument/CSV replace, a remote structural patch) and the plain
+   * captured index is already correct. A no-op if nothing was captured
+   * (e.g. no container yet).
+   */
+  _restoreScrollAnchor(anchor, rowIndex, colIndex) {
+    if (!anchor || !this.container) return;
+    const row = Math.min(this.rows - 1, Math.max(0, rowIndex !== undefined ? rowIndex : anchor.rowIndex));
+    const col = Math.min(this.cols - 1, Math.max(0, colIndex !== undefined ? colIndex : anchor.colIndex));
+    const rowTops = this._rowTops();
+    const colLefts = this._colLefts();
+    this.container.scrollTop = Math.max(0, rowTops[row] + anchor.rowOffsetPx);
+    this.container.scrollLeft = Math.max(0, colLefts[col] + anchor.colOffsetPx);
+    this._renderWindow();
+  }
+
+  /**
+   * Maps a pre-shift row/col index to its post-shift equivalent for a
+   * single insert/delete at `boundaryIndex` (count `count`) -- shared by
+   * _transformStructure (remapping the LOCAL editor's own scroll anchor)
+   * and applyRemote's structural branch (remapping every OTHER connected
+   * viewer's scroll anchor for a REMOTE insert/delete -- see applyRemote's
+   * doc comment for how the boundaryIndex/count/isInsert triple gets from
+   * the sender to here over the wire). Insert: shift by `count` if at/after
+   * the boundary. Delete: shift back by `count` if entirely past the
+   * deleted range, or clamp to the boundary itself if it fell inside the
+   * deleted range (whatever now occupies that position).
+   */
+  _remapStructuralIndex(idx, boundaryIndex, count, isInsert) {
+    if (isInsert) return idx >= boundaryIndex ? idx + count : idx;
+    if (idx >= boundaryIndex + count) return idx - count;
+    if (idx >= boundaryIndex) return boundaryIndex;
+    return idx;
+  }
+
+  /**
+   * Scrolls the container just enough (minimal adjustment, never more than
+   * needed -- not "center it") to bring `ref` fully into view, if it isn't
+   * already -- e.g. arrow-key traversal (_moveSelection, via _select) or a
+   * whole-row/column header selection landing outside the currently
+   * visible viewport. A merge origin's full span (not just its 1x1 top-
+   * left position) is what has to become visible -- a merge covering rows
+   * 5-7 isn't "in view" if only row 5 is. No-ops (and so never forces a
+   * render) if the ref is already fully visible, so normal same-window
+   * selection changes (the overwhelming majority) never touch scrollTop/
+   * scrollLeft or trigger an extra _renderWindow() call.
+   */
+  _scrollRefIntoView(ref) {
+    if (!this.container || !this._refInBounds(ref)) return;
+    const p = parseRef(ref);
+    const cell = this.cells[ref];
+    const merge = cell && cell.merge;
+    const rowSpan = (merge && merge.rows) || 1;
+    const colSpan = (merge && merge.cols) || 1;
+    this._scrollRowIntoView(p.row, rowSpan);
+    this._scrollColIntoView(p.col, colSpan);
+  }
+
+  /**
+   * Row counterpart used directly by _scrollRefIntoView above and by
+   * selectWholeRow (whose "selected" ref is the far edge column, not
+   * useful for deciding vertical scroll position -- the row index itself
+   * is what matters there). `span` covers a rowSpan>1 merge origin.
+   *
+   * This is a two-pass scroll: an initial estimate from the LOGICAL model
+   * (_rowTops(), built from rowHeights) gets the target row mounted (all
+   * _computeVisibleWindow's buffer needs to guarantee that), followed by
+   * _correctRowScrollForRealHeight's exact correction using the row's REAL
+   * rendered position once it exists -- see that method's doc comment for
+   * why the logical estimate alone isn't precise enough on its own.
+   */
+  _scrollRowIntoView(row, span = 1) {
+    if (!this.container) return;
+    const rowTops = this._rowTops();
+    const top = rowTops[row];
+    const bottom = rowTops[Math.min(this.rows, row + span)];
+    const viewTop = this.container.scrollTop;
+    const viewH = this.container.clientHeight;
+    let next = null;
+    if (top < viewTop) next = top;
+    else if (bottom > viewTop + viewH) next = Math.max(0, bottom - viewH);
+    if (next !== null && next !== viewTop) {
+      this.container.scrollTop = next;
+      // Recompute/remount immediately rather than waiting for the
+      // container's own async 'scroll' event + rAF throttle (_onScroll) --
+      // the caller (selection change) needs the newly-selected ref's <td>
+      // to exist right away (e.g. _highlightRange/_beginEdit run right
+      // after). _renderWindow() itself no-ops if this didn't actually
+      // change the windowed range, so this never causes extra churn beyond
+      // what the scroll already required.
+      this._renderWindow();
+    }
+    this._correctRowScrollForRealHeight(row, span);
+  }
+
+  /**
+   * _rowTops()'s cumulative offsets are built from rowHeights -- the
+   * CONTENT height a row's cell-content wrapper is explicitly clipped to
+   * (see _renderCell's own doc comment on why that's a separate div from
+   * the <td> itself), not the actual on-screen height of the rendered
+   * <tr>, which is a few px taller (table.grid td/th's own padding+border,
+   * see app.css) since a <tr>'s CSS height is only ever a floor under
+   * table layout, never a ceiling. That gap is invisible anywhere else in
+   * this file (nothing before virtualization ever computed a pixel
+   * position from rowHeights and compared it against a real scrollTop),
+   * but _scrollRowIntoView's logical-estimate pass above is exactly that
+   * computation -- confirmed via real-Chromium measurement to drift by
+   * multiple rows' worth of px once dozens of rows are mounted at once
+   * (real per-row height minus logical, times however many real rows sit
+   * between the viewport's edge and the target row), enough to leave the
+   * "scrolled into view" row actually just outside the viewport.
+   *
+   * Also accounts for the sticky <thead> (table.grid thead th { top: 0 },
+   * see app.css): a row whose top is geometrically within the container's
+   * own bounding box can still be entirely covered by the pinned header if
+   * it sits in that reserved band -- the logical model has no notion of
+   * this either.
+   *
+   * This runs AFTER the logical-estimate scroll has had a chance to mount
+   * the target row (that's the only reason the estimate pass exists at
+   * all -- _computeVisibleWindow can't mount a row it doesn't know to
+   * consider), then measures the row's real getBoundingClientRect() and
+   * nudges scrollTop by the exact remaining pixel delta, if any. A no-op
+   * if the row still isn't mounted (e.g. genuinely out of bounds) or is
+   * already fully visible.
+   */
+  _correctRowScrollForRealHeight(row, span = 1) {
+    if (!this.container || !this.table) return;
+    const startEl = this._rowElements[row];
+    const endEl = this._rowElements[Math.min(this.rows, row + span) - 1] || startEl;
+    if (!startEl || !endEl) return;
+    const containerRect = this.container.getBoundingClientRect();
+    const thead = this.table.querySelector('thead');
+    const stickyTop = containerRect.top + (thead ? thead.getBoundingClientRect().height : 0);
+    const startRect = startEl.getBoundingClientRect();
+    const endRect = endEl.getBoundingClientRect();
+    let delta = 0;
+    if (startRect.top < stickyTop) delta = startRect.top - stickyTop;
+    else if (endRect.bottom > containerRect.bottom) delta = endRect.bottom - containerRect.bottom;
+    if (delta) {
+      this.container.scrollTop = Math.max(0, this.container.scrollTop + delta);
+      this._renderWindow();
+    }
+  }
+
+  /** Column counterpart of _scrollRowIntoView -- see there for the overall
+   * two-pass shape. Columns don't suffer _scrollRowIntoView's real-vs-
+   * logical height drift (table-layout:fixed, see app.css, makes a
+   * <col>'s specified width authoritative, unlike a <tr>'s height, which
+   * is only ever a floor) -- but the sticky row-header column (table.grid
+   * tbody th { left: 0 }) has the exact same "geometrically inside the
+   * container, but actually covered by a pinned element" problem the
+   * sticky thead has for rows, so this still needs its own correction
+   * pass for that (_correctColScrollForStickyHeader). */
+  _scrollColIntoView(col, span = 1) {
+    if (!this.container) return;
+    const colLefts = this._colLefts();
+    const left = colLefts[col];
+    const right = colLefts[Math.min(this.cols, col + span)];
+    const viewLeft = this.container.scrollLeft;
+    const viewW = this.container.clientWidth;
+    let next = null;
+    if (left < viewLeft) next = left;
+    else if (right > viewLeft + viewW) next = Math.max(0, right - viewW);
+    if (next !== null && next !== viewLeft) {
+      this.container.scrollLeft = next;
+      this._renderWindow();
+    }
+    this._correctColScrollForStickyHeader(col, span);
+  }
+
+  /** Sticky-row-header-column counterpart of _correctRowScrollForRealHeight
+   * -- see there. Column headers (thead th) are never windowed (see
+   * _build()), so `this._colHeaderElements[col]` is always a real,
+   * correctly-positioned element regardless of scroll -- no need to wait
+   * for a remount the way the row version does. */
+  _correctColScrollForStickyHeader(col, span = 1) {
+    if (!this.container || !this.table) return;
+    const startTh = this._colHeaderElements[col];
+    const endTh = this._colHeaderElements[Math.min(this.cols, col + span) - 1] || startTh;
+    if (!startTh || !endTh) return;
+    const containerRect = this.container.getBoundingClientRect();
+    const rowHeaderTh = this.table.querySelector('tbody th') || this.table.querySelector('thead th');
+    const stickyLeftWidth = rowHeaderTh ? rowHeaderTh.getBoundingClientRect().width : ROW_HEADER_WIDTH;
+    const stickyLeft = containerRect.left + stickyLeftWidth;
+    const startRect = startTh.getBoundingClientRect();
+    const endRect = endTh.getBoundingClientRect();
+    let delta = 0;
+    if (startRect.left < stickyLeft) delta = startRect.left - stickyLeft;
+    else if (endRect.right > containerRect.right) delta = endRect.right - containerRect.right;
+    if (delta) {
+      this.container.scrollLeft = Math.max(0, this.container.scrollLeft + delta);
+      this._renderWindow();
+    }
+  }
+
+  /** Largest index i (0 <= i < count) such that offsets[i] <= x -- i.e. the
+   * row/column whose pixel range contains position x. `offsets` is one of
+   * _rowTops()/_colLefts()'s arrays (length count+1, strictly
+   * non-decreasing). Binary search since a large sheet's row/column count
+   * can run into the thousands and this runs on every scroll-driven
+   * recompute. */
+  _findOffsetIndex(offsets, x, count) {
+    if (count <= 0) return 0;
+    if (x <= 0) return 0;
+    if (offsets[count] <= x) return count - 1;
+    let lo = 0, hi = count - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (offsets[mid] <= x) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  /**
+   * Computes which row/column range should currently have real DOM nodes:
+   * the range actually visible in the scroll container, plus a buffer on
+   * every edge (a fraction of the viewport itself, floored at
+   * MIN_ROW_BUFFER_PX/MIN_COL_BUFFER_PX -- see those constants' doc
+   * comment) so a scroll doesn't outrun the rendered window and flash
+   * blank space before the next remount catches up.
+   *
+   * Then expands that range so it never lands in the middle of a merge
+   * (Fernando's requirement: a merge spanning rows 5-7 must not have row 6
+   * windowed independently of 5 and 7) -- any merge that overlaps the
+   * window AT ALL gets fully included, not just merges that straddle the
+   * exact edge, which is simpler and strictly safer. Iterates to a fixed
+   * point (capped at _mergeOrigins.length+1 passes, always enough --
+   * each pass that changes anything strictly grows the range to include
+   * at least one more not-yet-included merge) since including one merge
+   * can newly overlap another (chained/adjacent merges) -- cheap
+   * regardless, since _mergeOrigins is only ever as long as the sheet's
+   * actual merge count, never its total cell count.
+   */
+  _computeVisibleWindow() {
+    const rowTops = this._rowTops();
+    const colLefts = this._colLefts();
+    const viewportH = this.container.clientHeight || 800;
+    const viewportW = this.container.clientWidth || 1200;
+    const scrollTop = this.container.scrollTop;
+    const scrollLeft = this.container.scrollLeft;
+    const rowBufferPx = Math.max(MIN_ROW_BUFFER_PX, viewportH * BUFFER_VIEWPORT_FRACTION);
+    const colBufferPx = Math.max(MIN_COL_BUFFER_PX, viewportW * BUFFER_VIEWPORT_FRACTION);
+
+    let rowStart = this._findOffsetIndex(rowTops, scrollTop - rowBufferPx, this.rows);
+    let rowEnd = this._findOffsetIndex(rowTops, scrollTop + viewportH + rowBufferPx, this.rows);
+    let colStart = this._findOffsetIndex(colLefts, scrollLeft - colBufferPx, this.cols);
+    let colEnd = this._findOffsetIndex(colLefts, scrollLeft + viewportW + colBufferPx, this.cols);
+
+    for (let pass = 0; pass < this._mergeOrigins.length + 1; pass++) {
+      let changed = false;
+      for (const m of this._mergeOrigins) {
+        const mRowEnd = m.row + m.rows - 1;
+        const mColEnd = m.col + m.cols - 1;
+        if (m.row <= rowEnd && mRowEnd >= rowStart) {
+          if (m.row < rowStart) { rowStart = m.row; changed = true; }
+          if (mRowEnd > rowEnd) { rowEnd = mRowEnd; changed = true; }
+        }
+        if (m.col <= colEnd && mColEnd >= colStart) {
+          if (m.col < colStart) { colStart = m.col; changed = true; }
+          if (mColEnd > colEnd) { colEnd = mColEnd; changed = true; }
+        }
+      }
+      if (!changed) break;
+    }
+
+    // Snap outward to chunk boundaries (see ROW_CHUNK/COL_CHUNK's doc
+    // comment) -- purely to cut how often the window actually changes
+    // during a continuous scroll, not a correctness requirement.
+    rowStart = Math.floor(rowStart / ROW_CHUNK) * ROW_CHUNK;
+    rowEnd = Math.min(this.rows - 1, Math.ceil((rowEnd + 1) / ROW_CHUNK) * ROW_CHUNK - 1);
+    colStart = Math.floor(colStart / COL_CHUNK) * COL_CHUNK;
+    colEnd = Math.min(this.cols - 1, Math.ceil((colEnd + 1) / COL_CHUNK) * COL_CHUNK - 1);
+
+    return { rowStart, rowEnd, colStart, colEnd, rowTops, colLefts };
+  }
+
+  /**
+   * Mounts real <tr>/<td> nodes for the current visible+buffer window (see
+   * _computeVisibleWindow) and nothing else -- the core of the
+   * virtualization foundation. Called on initial build, on every
+   * structural rebuild (_build() forces this via this._lastWindow = null),
+   * and on every scroll/resize (_onScroll, the window 'resize' listener).
+   *
+   * RECYCLES existing <tr>/<td> nodes across a scroll-driven remount rather
+   * than destroying and rebuilding the whole windowed <tbody> every time
+   * (see _reconcileWindow) -- a row/column that's already mounted and stays
+   * in the new window just gets repositioned/left alone; only a row/column
+   * actually entering the window gets a genuinely new node, and only one
+   * actually leaving gets removed. An earlier version of this method did
+   * destroy-and-recreate the whole window every call, reasoning that a
+   * rAF-throttled, window-bounded rebuild would be cheap regardless of
+   * total sheet size -- true in an isolated micro-benchmark (no real CSS/
+   * formatting/style-recalc cost), but confirmed via real-Chromium
+   * measurement against the actual integrated app (220x52 sheet, real
+   * app.css) to make real scroll performance measurably WORSE than
+   * pre-virtualization master, not better -- the node-churn/style-recalc
+   * cost of genuinely new elements on every single scroll tick outweighed
+   * the "bounded, not O(sheet size)" argument. Recycling fixes that while
+   * keeping every win the destroy/recreate version had: DOM node count
+   * still bounded by the window (not sheet) size, cold load still only
+   * mounts one window's worth of nodes, and the window/merge-boundary
+   * computation itself (_computeVisibleWindow) is untouched.
+   *
+   * Falls back to a full (re)mount (_mountWindowFull) -- functionally
+   * identical to the old destroy/recreate behavior -- whenever there's no
+   * valid previous window to reconcile FROM (this._tbody is null, e.g.
+   * right after _build() reset it, or this._lastWindow was explicitly
+   * nulled, e.g. applyRemote's columnWidths/rowHeights branch forcing a
+   * fresh layout after pixel offsets changed). That's the correct
+   * fallback, not just a convenient one: reconciliation assumes
+   * this._rowElements/_cellElements/tr._leftSpacer etc. already correctly
+   * reflect a previously-mounted window, which isn't true the first time a
+   * table exists.
+   *
+   * A no-op if the computed window is identical to the last one rendered
+   * (e.g. a sub-pixel/no-op scroll event, or a resize that didn't actually
+   * change the visible range) -- avoids needless DOM work on every single
+   * scroll event even before the rAF throttle in _onScroll kicks in.
+   */
+  _renderWindow() {
+    if (!this.table) return;
+    const win = this._computeVisibleWindow();
+    const prevWindow = this._lastWindow;
+    if (prevWindow
+      && prevWindow.rowStart === win.rowStart && prevWindow.rowEnd === win.rowEnd
+      && prevWindow.colStart === win.colStart && prevWindow.colEnd === win.colEnd) {
+      return;
+    }
+    this._lastWindow = { rowStart: win.rowStart, rowEnd: win.rowEnd, colStart: win.colStart, colEnd: win.colEnd };
+
+    let newlyMountedRefs;
+    if (!this._tbody || !prevWindow) {
+      this._mountWindowFull(win);
+      newlyMountedRefs = this._cellElements.keys();
+    } else {
+      newlyMountedRefs = this._reconcileWindow(prevWindow, win);
+    }
+
+    // A live row-resize drag (_onResizeMove/_resizing) holds a direct
+    // reference to the <tr> it's dragging -- if a scroll-driven remount
+    // just dropped that row from the window (recycling removes/re-creates
+    // individual rows, so this can still happen even though most rows
+    // survive a remount untouched now), the drag's `el` is a detached,
+    // orphaned node: further live-height writes during the drag would
+    // silently apply to nothing visible. Rebind to the freshly-mounted
+    // <tr> for the same row (if it's still in the window, whether recycled
+    // or newly created) and reapply whatever live size the drag was
+    // already showing, so the resize continues seamlessly instead of
+    // visually freezing. If the row scrolled fully out of the new window,
+    // there's genuinely no handle for it any more -- `el` stays stale, but
+    // _onResizeEnd still commits the correct final size from `key`/
+    // `liveSize` regardless of DOM state, so the actual data-level result
+    // is unaffected either way.
+    if (this._resizing && this._resizing.kind === 'row') {
+      const idx = Number(this._resizing.key) - 1;
+      const newEl = this._rowElements[idx];
+      if (newEl) {
+        this._resizing.el = newEl;
+        const liveSize = this._resizing.liveSize !== undefined ? this._resizing.liveSize : this._resizing.startSize;
+        newEl.style.height = liveSize + 'px';
+        this._syncRowCellHeights(newEl, liveSize);
       }
     }
+
+    // Fill in content only for cells that are actually new to the DOM this
+    // pass -- see _renderNewlyMountedRefs's doc comment for why a recycled,
+    // still-mounted cell doesn't need (and must NOT get, to preserve the
+    // whole point of recycling) a redundant re-render here.
+    this._renderNewlyMountedRefs(newlyMountedRefs);
+
+    // The DOM nodes backing the selection may be new (or, for a recycled
+    // cell, may already have the right highlight class from before -- this
+    // is idempotent either way) -- state (this.anchor/this.selected) is
+    // unaffected by a remount, so just reapply it to whichever refs happen
+    // to be mounted now; _highlightRange already no-ops for a ref with no
+    // live node.
+    if (this.anchor && this.selected) this._highlightRange(this.anchor, this.selected);
+
+    if (this.onWindowChange) this.onWindowChange();
+  }
+
+  /**
+   * Builds one <td> for `ref` (registering it in this._cellElements) --
+   * shared by the full-mount path and the recycling path's "genuinely new
+   * cell" case, so both apply IDENTICAL merge-span/height/overflow setup.
+   * Caller is responsible for checking this._coverage first (a
+   * merge-covered ref never gets its own node, on either path) and for
+   * actually inserting the returned node into the DOM.
+   */
+  _createCellNode(ref, rowNum, rowHeight) {
+    const td = document.createElement('td');
+    td.dataset.ref = ref;
+    td.tabIndex = -1;
+    const merge = this.cells[ref] && this.cells[ref].merge;
+    if (merge) {
+      if (merge.cols > 1) td.colSpan = merge.cols;
+      if (merge.rows > 1) td.rowSpan = merge.rows;
+    }
+    if (!merge || !merge.rows || merge.rows <= 1) {
+      td.style.height = rowHeight + 'px';
+      td.style.overflow = 'hidden';
+    }
+    this._cellElements.set(ref, td);
+    return td;
+  }
+
+  /**
+   * Builds one full <tr> (row header + spacer(s) + data cells) for row `r`
+   * across column range [colStart, colEnd] -- shared by the full-mount path
+   * and the recycling path's "genuinely new row" case. Registers the <tr>/
+   * row-header <th> in this._rowElements/_rowHeaderElements, and stashes
+   * the left/right spacer <td> elements directly on the <tr> itself
+   * (`tr._leftSpacer`/`tr._rightSpacer`) so a later column-window change
+   * that keeps this same row mounted (_reconcileRowColumns) can find and
+   * resize/remove/recreate them in O(1) without re-querying the DOM. Does
+   * NOT append the returned <tr> anywhere -- the caller decides where it
+   * goes in the tbody.
+   */
+  _createRowNode(r, colStart, colEnd) {
+    const rowNum = r + 1;
+    const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
+    const tr = document.createElement('tr');
+    tr.style.height = rowHeight + 'px';
+    this._rowElements[r] = tr;
+    const rowHead = document.createElement('th');
+    rowHead.textContent = String(rowNum);
+    rowHead.dataset.rowIndex = String(r);
+    rowHead.addEventListener('mousedown', (e) => this._onRowHeaderMouseDown(e, r));
+    rowHead.addEventListener('touchstart', (e) => this._onRowHeaderTouchStart(e, r), { passive: true });
+    this._rowHeaderElements[r] = rowHead;
+    rowHead.appendChild(this._rowResizeHandle(rowNum, tr));
+    // See _build()'s original comment on this same block for why the
+    // explicit height+overflow lives on each cell, not just the <tr>.
+    rowHead.style.height = rowHeight + 'px';
+    rowHead.style.overflow = 'hidden';
+    tr.appendChild(rowHead);
+
+    tr._leftSpacer = null;
+    tr._rightSpacer = null;
+
+    if (colStart > 0) {
+      tr._leftSpacer = document.createElement('td');
+      tr._leftSpacer.className = 'grid-spacer-cell';
+      tr._leftSpacer.colSpan = colStart;
+      tr.appendChild(tr._leftSpacer);
+    }
+
+    for (let c = colStart; c <= colEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      if (this._coverage.has(ref)) continue; // reserved by an earlier cell's colspan/rowspan
+      tr.appendChild(this._createCellNode(ref, rowNum, rowHeight));
+    }
+
+    if (colEnd < this.cols - 1) {
+      tr._rightSpacer = document.createElement('td');
+      tr._rightSpacer.className = 'grid-spacer-cell';
+      tr._rightSpacer.colSpan = this.cols - 1 - colEnd;
+      tr.appendChild(tr._rightSpacer);
+    }
+
+    return tr;
+  }
+
+  /**
+   * Removes row `r`'s <tr> (and its row-header <th>, and every data <td> it
+   * held) from the DOM and from this._rowElements/_rowHeaderElements/
+   * _cellElements -- used when a scroll-driven remount drops a row from the
+   * window entirely. Cleaning up _cellElements here (not just detaching the
+   * <tr>, which would clean up its children for free as far as the DOM goes)
+   * is required for _cellEl()'s "null means not currently mounted" contract
+   * to stay correct -- otherwise a removed row's cells would still resolve
+   * to a (now-detached) node instead of null.
+   */
+  _removeRow(r) {
+    const tr = this._rowElements[r];
+    if (!tr) return;
+    for (const child of tr.children) {
+      if (child.dataset && child.dataset.ref) this._cellElements.delete(child.dataset.ref);
+    }
+    tr.remove();
+    delete this._rowElements[r];
+    delete this._rowHeaderElements[r];
+  }
+
+  /**
+   * Full (re)mount of the tbody for the given window -- functionally
+   * identical to _renderWindow's old unconditional behavior (build a brand
+   * new <tbody>, discard whatever was there before). Used only when there's
+   * no valid previous window to reconcile from (see _renderWindow's doc
+   * comment on when that's the case) -- i.e. exactly the situations where
+   * the old destroy/recreate approach's cost was never the problem in the
+   * first place (once per structural rebuild or remote pixel-offset patch,
+   * not once per scroll tick).
+   */
+  _mountWindowFull(win) {
+    const { rowTops, rowStart, rowEnd, colStart, colEnd } = win;
+    const tbody = document.createElement('tbody');
+    this._cellElements = new Map();
+    this._rowElements = [];
+    this._rowHeaderElements = [];
+    this._topSpacerRow = null;
+    this._bottomSpacerRow = null;
+
+    if (rowStart > 0) {
+      this._topSpacerRow = this._makeSpacerRow(rowTops[rowStart], this.cols + 1);
+      tbody.appendChild(this._topSpacerRow);
+    }
+
+    for (let r = rowStart; r <= rowEnd; r++) {
+      tbody.appendChild(this._createRowNode(r, colStart, colEnd));
+    }
+
+    if (rowEnd < this.rows - 1) {
+      this._bottomSpacerRow = this._makeSpacerRow(rowTops[this.rows] - rowTops[rowEnd + 1], this.cols + 1);
+      tbody.appendChild(this._bottomSpacerRow);
+    }
+
+    if (this._tbody) this.table.replaceChild(tbody, this._tbody);
+    else this.table.appendChild(tbody);
+    this._tbody = tbody;
+  }
+
+  /**
+   * Reconciles the currently-mounted tbody (built from `prevWindow`) toward
+   * `win`, recycling every row/column that's in both ranges instead of
+   * touching it at all, and returns the Set of refs that are newly mounted
+   * this pass (genuinely new cells, from either a newly-created row or a
+   * newly-entering column within a kept row) -- exactly what
+   * _renderNewlyMountedRefs needs to render content for.
+   *
+   * Both `prevWindow` and `win`'s row (and column) ranges are contiguous
+   * integer intervals (see _computeVisibleWindow), so "removed" is always
+   * at most a prefix + a suffix of the old range, and "added" is always at
+   * most a prefix + a suffix of the new range -- true even for a large,
+   * non-overlapping jump (e.g. Home/End or a fast fling), where the
+   * min/max-clamped ranges below correctly degenerate to "remove
+   * everything old" / "add everything new". No generic set-diffing needed.
+   */
+  _reconcileWindow(prevWindow, win) {
+    const { rowTops, rowStart, rowEnd, colStart, colEnd } = win;
+    const pRS = prevWindow.rowStart, pRE = prevWindow.rowEnd;
+    const pCS = prevWindow.colStart, pCE = prevWindow.colEnd;
+    const tbody = this._tbody;
+    const newlyMounted = new Set();
+
+    // Spacer rows are cheap (one <tr>/<td> pair each) -- always drop and
+    // recreate them fresh at the end, rather than reconciling them like
+    // real content rows. Removing them up front also means the "current
+    // first/last child" anchors used below never have to account for them.
+    if (this._topSpacerRow) { this._topSpacerRow.remove(); this._topSpacerRow = null; }
+    if (this._bottomSpacerRow) { this._bottomSpacerRow.remove(); this._bottomSpacerRow = null; }
+
+    // Rows leaving the window (top edge, then bottom edge).
+    for (let r = pRS; r <= Math.min(pRE, rowStart - 1); r++) this._removeRow(r);
+    for (let r = Math.max(pRS, rowEnd + 1); r <= pRE; r++) this._removeRow(r);
+
+    // Rows kept in both windows: recycle the <tr> in place, only
+    // adjusting its columns (which may themselves have changed).
+    const keptRowStart = Math.max(pRS, rowStart);
+    const keptRowEnd = Math.min(pRE, rowEnd);
+    for (let r = keptRowStart; r <= keptRowEnd; r++) {
+      const tr = this._rowElements[r];
+      if (!tr) continue; // shouldn't happen, but never crash rendering over it
+      this._reconcileRowColumns(r, tr, pCS, pCE, colStart, colEnd, newlyMounted);
+    }
+
+    // Rows newly entering the window (top edge, then bottom edge). Ascending
+    // insertBefore(newTr, topAnchor) against the SAME fixed anchor node
+    // produces ascending DOM order for free (each new row lands directly
+    // before whatever was already there, pushing nothing else around) --
+    // topAnchor is captured once, before any of these insertions, and stays
+    // a valid reference throughout since none of these insertions remove
+    // it. Bottom-entering rows use plain appendChild for the same reason,
+    // in reverse (append preserves ascending order when done in ascending
+    // source order).
+    const topAnchor = tbody.firstChild;
+    for (let r = rowStart; r <= Math.min(rowEnd, pRS - 1); r++) {
+      tbody.insertBefore(this._createRowNode(r, colStart, colEnd), topAnchor);
+      this._collectRowRefs(this._rowElements[r], newlyMounted);
+    }
+    for (let r = Math.max(rowStart, pRE + 1); r <= rowEnd; r++) {
+      tbody.appendChild(this._createRowNode(r, colStart, colEnd));
+      this._collectRowRefs(this._rowElements[r], newlyMounted);
+    }
+
+    if (rowStart > 0) {
+      this._topSpacerRow = this._makeSpacerRow(rowTops[rowStart], this.cols + 1);
+      tbody.insertBefore(this._topSpacerRow, tbody.firstChild);
+    }
+    if (rowEnd < this.rows - 1) {
+      this._bottomSpacerRow = this._makeSpacerRow(rowTops[this.rows] - rowTops[rowEnd + 1], this.cols + 1);
+      tbody.appendChild(this._bottomSpacerRow);
+    }
+
+    return newlyMounted;
+  }
+
+  /** Adds every data-cell ref found among `tr`'s children into `into` (a
+   * Set) -- used right after _createRowNode to record which refs a
+   * brand-new row just introduced, for _reconcileWindow's return value. */
+  _collectRowRefs(tr, into) {
+    if (!tr) return;
+    for (const child of tr.children) {
+      if (child.dataset && child.dataset.ref) into.add(child.dataset.ref);
+    }
+  }
+
+  /**
+   * Reconciles a single KEPT row's columns from [prevColStart, prevColEnd]
+   * to [colStart, colEnd] -- removes cells leaving at either edge, resizes/
+   * creates/removes the left/right spacer <td>s, and creates cells newly
+   * entering at either edge, inserting each at the correct position without
+   * disturbing any cell that was already there and stays. Newly-created
+   * refs are added to `newlyMounted` (mutated in place) so the caller can
+   * render their content afterward.
+   *
+   * Insertion uses the same "ascending inserts against one fixed anchor"
+   * trick _reconcileWindow uses for rows (see there): `leftAnchor` and
+   * `rightAnchor` are captured once, before any mutation that could affect
+   * them, and referenced as actual DOM nodes (not positions/indices), so
+   * they stay valid through every subsequent insertBefore/remove/create
+   * this method does.
+   *
+   * Deliberately does NOT touch a kept cell's rowSpan/colSpan (unlike the
+   * fresh-creation path in _createCellNode, which sets it from
+   * this.cells[ref].merge) -- merges only ever change via a structural
+   * _build() rebuild, which always does a full remount (_mountWindowFull),
+   * never reaches this method with a stale span. Within one _build()
+   * generation, a given ref's merge span is invariant across any number of
+   * scroll-driven reconciliations.
+   */
+  _reconcileRowColumns(r, tr, prevColStart, prevColEnd, colStart, colEnd, newlyMounted) {
+    const rowNum = r + 1;
+    const rowHeight = this.rowHeights[rowNum] || DEFAULT_ROW_HEIGHT;
+
+    // Columns leaving on the left edge, then the right edge. A covered
+    // (merge-spanned-over) ref never had an entry in this._cellElements,
+    // so the lookup is just a no-op for those -- safe either way.
+    for (let c = prevColStart; c <= Math.min(prevColEnd, colStart - 1); c++) {
+      const ref = colLetter(c) + rowNum;
+      const td = this._cellElements.get(ref);
+      if (td) { td.remove(); this._cellElements.delete(ref); }
+    }
+    for (let c = Math.max(prevColStart, colEnd + 1); c <= prevColEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      const td = this._cellElements.get(ref);
+      if (td) { td.remove(); this._cellElements.delete(ref); }
+    }
+
+    // Captured BEFORE touching the left spacer -- if a left spacer already
+    // existed, this is exactly the first surviving element after it (the
+    // leftmost kept cell, or the right spacer, or null); if it didn't,
+    // tr.children[1] (index 0 is always the row-header <th>) is that same
+    // "first surviving element" directly. Either way this reference stays
+    // valid through the spacer create/resize/remove below and the
+    // left-edge insert loop after it.
+    const leftAnchor = tr._leftSpacer ? tr._leftSpacer.nextSibling : (tr.children[1] || null);
+
+    if (colStart > 0) {
+      if (!tr._leftSpacer) {
+        tr._leftSpacer = document.createElement('td');
+        tr._leftSpacer.className = 'grid-spacer-cell';
+        tr.insertBefore(tr._leftSpacer, tr.children[1] || null);
+      }
+      tr._leftSpacer.colSpan = colStart;
+    } else if (tr._leftSpacer) {
+      tr._leftSpacer.remove();
+      tr._leftSpacer = null;
+    }
+
+    // Columns newly entering on the left edge, ascending, each inserted
+    // right before leftAnchor -- see the class-level doc comment for why
+    // ascending source order against one fixed anchor yields ascending DOM
+    // order.
+    const leftAddEnd = Math.min(colEnd, prevColStart - 1);
+    for (let c = colStart; c <= leftAddEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      if (this._coverage.has(ref)) continue;
+      tr.insertBefore(this._createCellNode(ref, rowNum, rowHeight), leftAnchor);
+      newlyMounted.add(ref);
+    }
+
+    // Captured before touching the right spacer, for the same reason as
+    // leftAnchor above.
+    const rightAnchor = tr._rightSpacer || null;
+    const rightAddStart = Math.max(prevColEnd + 1, colStart);
+    for (let c = rightAddStart; c <= colEnd; c++) {
+      const ref = colLetter(c) + rowNum;
+      if (this._coverage.has(ref)) continue;
+      tr.insertBefore(this._createCellNode(ref, rowNum, rowHeight), rightAnchor);
+      newlyMounted.add(ref);
+    }
+
+    if (colEnd < this.cols - 1) {
+      if (!tr._rightSpacer) {
+        tr._rightSpacer = document.createElement('td');
+        tr._rightSpacer.className = 'grid-spacer-cell';
+        tr.appendChild(tr._rightSpacer); // every real cell for this row is already placed -- true end is correct
+      }
+      tr._rightSpacer.colSpan = this.cols - 1 - colEnd;
+    } else if (tr._rightSpacer) {
+      tr._rightSpacer.remove();
+      tr._rightSpacer = null;
+    }
+  }
+
+  /** A single spacer <tr> occupying `height`px, standing in for every row
+   * currently outside the rendered window (see _renderWindow) -- keeps the
+   * scroll container's total scrollable height (and so scrollbar size/
+   * position) correct without needing a real <tr>/<td> per skipped row.
+   * colSpan covers the row-header column too (`this.cols + 1`), same as
+   * every real data row's row-header <th> + this.cols data <td>s. */
+  _makeSpacerRow(height, colSpan) {
+    const tr = document.createElement('tr');
+    tr.className = 'grid-spacer-row';
+    const td = document.createElement('td');
+    td.className = 'grid-spacer-cell';
+    td.colSpan = colSpan;
+    td.style.height = Math.max(0, height) + 'px';
+    tr.appendChild(td);
+    return tr;
+  }
+
+  /** Scroll handler for the windowed render -- rAF-throttled so a fast
+   * scroll/fling (which can fire many scroll events per frame on some
+   * platforms) recomputes the window at most once per paint, not once per
+   * event. */
+  _onScroll() {
+    if (this._scrollRafPending) return;
+    this._scrollRafPending = true;
+    requestAnimationFrame(() => {
+      this._scrollRafPending = false;
+      this._renderWindow();
+    });
+  }
+
+  /** Starts the drag-select auto-scroll interval if not already running --
+   * see _dragAutoScrollTick's doc comment for why this is interval-driven
+   * rather than purely mousemove/touchmove-driven. Called from every
+   * drag-start site (_onMouseDown, _onRowHeaderMouseDown/
+   * _onColHeaderMouseDown, the touch drag-arm timer in
+   * _armTouchDragCandidate). */
+  _startDragAutoScroll() {
+    if (this._dragAutoScrollTimer) return;
+    this._dragAutoScrollTimer = setInterval(() => this._dragAutoScrollTick(), 50);
+  }
+
+  /** Stops the drag-select auto-scroll interval -- called from every
+   * drag-end site (_onMouseUp, _onTouchEnd). Safe to call when not running. */
+  _stopDragAutoScroll() {
+    if (this._dragAutoScrollTimer) {
+      clearInterval(this._dragAutoScrollTimer);
+      this._dragAutoScrollTimer = null;
+    }
+    this._lastPointerXY = null;
+  }
+
+  /**
+   * Nudges the scroll container toward the pointer whenever an active
+   * drag-select (plain cell range, or whole-row/whole-column header range)
+   * is held near a viewport edge -- standard spreadsheet-app behavior
+   * (Excel/Sheets both do this), and a real requirement under windowing:
+   * without it, a drag can never reach a row/column outside the current
+   * render window at all, since the window otherwise only ever moves via
+   * an explicit user scroll gesture, which a held mouse-button drag can't
+   * also perform at the same time.
+   *
+   * Runs on a plain interval (_startDragAutoScroll), not directly off
+   * mousemove/touchmove -- mousemove stops firing entirely once the
+   * pointer itself stops moving, so a pointer deliberately held still at
+   * the very edge (the normal way to trigger this in every spreadsheet
+   * app) would otherwise never advance. `_lastPointerXY` (kept fresh by
+   * every mousemove/touchmove during a drag) is what this reads instead of
+   * an event.
+   *
+   * After actually moving the scroll position, re-renders the window
+   * immediately (not waiting for the container's async 'scroll' event +
+   * _onScroll's rAF throttle) and re-resolves the selection at the last
+   * known pointer position via elementFromPoint -- the pointer itself
+   * hasn't moved, but the DOM under it has (a previously off-screen row/
+   * column may now be mounted), so the drag has to re-hit-test rather than
+   * wait for the next real mousemove/touchmove (which may never come if
+   * the pointer stays perfectly still at the edge).
+   */
+  _dragAutoScrollTick() {
+    if (!this._dragging && !this._headerDragging) { this._stopDragAutoScroll(); return; }
+    const xy = this._lastPointerXY;
+    if (!xy || !this.container) return;
+    const rect = this.container.getBoundingClientRect();
+    const margin = 36;
+    const step = 22;
+    let dy = 0, dx = 0;
+    if (xy.y < rect.top + margin) dy = -step;
+    else if (xy.y > rect.bottom - margin) dy = step;
+    if (xy.x < rect.left + margin) dx = -step;
+    else if (xy.x > rect.right - margin) dx = step;
+    if (!dx && !dy) return;
+    const prevTop = this.container.scrollTop;
+    const prevLeft = this.container.scrollLeft;
+    this.container.scrollTop = Math.max(0, prevTop + dy);
+    this.container.scrollLeft = Math.max(0, prevLeft + dx);
+    if (this.container.scrollTop === prevTop && this.container.scrollLeft === prevLeft) return; // already at a scroll limit
+    this._renderWindow();
+    if (this._headerDragging === 'row') {
+      const el = this._resolveDragTarget('row', xy.x, xy.y);
+      const th = el && el.closest('tbody th');
+      if (th && th.dataset.rowIndex !== undefined) this.selectWholeRow(Number(th.dataset.rowIndex), true);
+    } else if (this._headerDragging === 'col') {
+      const el = this._resolveDragTarget('col', xy.x, xy.y);
+      const th = el && el.closest('thead th');
+      if (th && th.dataset.colIndex !== undefined) this.selectWholeColumn(Number(th.dataset.colIndex), true);
+    } else if (this._dragging) {
+      const el = this._resolveDragTarget('cell', xy.x, xy.y);
+      const td = el && el.closest('td');
+      if (td && td.dataset.ref && td.dataset.ref !== this.selected) {
+        this.selected = td.dataset.ref;
+        this._highlightRange(this.anchor, this.selected);
+        if (this.onSelectionChange) this.onSelectionChange(this.selected);
+      }
+    }
+  }
+
+  /**
+   * Re-resolves what's "under" client position (x, y) for drag-select
+   * hit-testing -- used by _onMouseMoveDrag, _dragAutoScrollTick above, and
+   * _onTouchMove instead of a bare document.elementFromPoint/e.target,
+   * because the pointer during an active drag is routinely sitting
+   * exactly on top of one of the grid's STICKY overlays (the row-header
+   * column, sticky at the left edge, or the column-header row, sticky at
+   * the top edge) rather than on the kind of element the current drag
+   * actually needs:
+   *
+   * - A plain cell-range drag (`kind: 'cell'`) needs a <td>. Auto-scroll
+   *   specifically engages when the pointer is held near the left/top
+   *   viewport edge (see _dragAutoScrollTick above) -- exactly where the
+   *   sticky row-header/column-header overlay sits, so a naive hit-test
+   *   there lands on a <th>, not a <td>, and the drag silently stops
+   *   extending even though auto-scroll keeps running (confirmed live:
+   *   this is what made a drag-select's final selection get truncated at
+   *   that edge).
+   * - A row-header drag (`kind: 'row'`) needs a `tbody th`. A natural
+   *   diagonal drag easily carries the pointer's x off the header
+   *   column's narrow track onto the data grid entirely, which hit-tests
+   *   to a <td> instead -- same failure mode, transposed.
+   * - A col-header drag (`kind: 'col'`) is the transposed counterpart of
+   *   that (pointer's y drifts off the header row onto the data grid).
+   *
+   * Strategy: try the natural (unclamped) hit-test first -- the
+   * overwhelming majority of drag ticks/moves land exactly where expected
+   * and never need anything else. Only if that doesn't resolve to the
+   * kind of element this drag needs, clamp x/y just onto/past whichever
+   * sticky overlay is relevant for `kind` and re-test:
+   *   - cell: push the tested x past the sticky row-header column (if x
+   *     was within it) and the tested y past the sticky column-header row
+   *     (if y was within it), landing just inside the data-cell area on
+   *     whichever axis wasn't already fine.
+   *   - row: pull the tested x back ONTO the row-header column's own
+   *     x-range (y -- what actually determines which row -- is left
+   *     alone, since it's still an accurate reflection of where the
+   *     pointer really is).
+   *   - col: pull the tested y back onto the column-header row's own
+   *     y-range (x left alone), the transposed counterpart.
+   */
+  _resolveDragTarget(kind, x, y) {
+    const first = document.elementFromPoint(x, y);
+    const matches = (el) => {
+      if (!el) return false;
+      if (kind === 'cell') return !!el.closest('td');
+      if (kind === 'row') return !!el.closest('tbody th');
+      // 'col': the empty top-left CORNER <th> (built before the per-column
+      // loop in _build(), see there) also matches a bare
+      // `el.closest('thead th')` test -- it IS a `thead th` -- but it has
+      // no data-col-index and isn't a real column header, so accepting it
+      // here would return early (below) with a "match" that every caller's
+      // own `th.dataset.colIndex !== undefined` check then rejects,
+      // silently freezing the drag instead of falling through to the
+      // clamp logic that would have found the real column-header <th>.
+      const th = el.closest('thead th');
+      return !!th && th.dataset.colIndex !== undefined;
+    };
+    if (matches(first)) return first;
+    if (!this.container || !this.table) return first;
+    // getBoundingClientRect() reports the container's BORDER box -- rect.
+    // left/rect.top are the outer edge of its 1px `.grid-scroll` border
+    // (see app.css), not where its content (and the sticky th's stuck to
+    // it) actually starts. The sticky row-header/column-header elements are
+    // positioned relative to the content box, one border-width further in,
+    // so clamping straight off rect.left/rect.top (as this used to) landed
+    // short by exactly that border width -- at the scroll floor (scrollTop/
+    // scrollLeft === 0, the only time this clamp path is actually reachable
+    // for the true top-left corner) elementFromPoint at the clamped point
+    // then still hit the sticky <th> instead of the intended <td>, so a
+    // drag-select could get right up to the corner and then permanently
+    // stop extending on that axis even though auto-scroll kept scrolling.
+    // Confirmed via real-Chromium measurement: rowHeaderTh/thead's own
+    // getBoundingClientRect().left/top already sit at rect.left/top +
+    // this border width, not at rect.left/top directly.
+    const containerStyle = getComputedStyle(this.container);
+    const borderLeft = parseFloat(containerStyle.borderLeftWidth) || 0;
+    const borderTop = parseFloat(containerStyle.borderTopWidth) || 0;
+    const rect = this.container.getBoundingClientRect();
+    const contentLeft = rect.left + borderLeft;
+    const contentTop = rect.top + borderTop;
+    const rowHeaderTh = this.table.querySelector('tbody th');
+    const stickyLeftWidth = rowHeaderTh ? rowHeaderTh.getBoundingClientRect().width : ROW_HEADER_WIDTH;
+    const thead = this.table.querySelector('thead');
+    const stickyTopHeight = thead ? thead.getBoundingClientRect().height : 0;
+    let cx = x, cy = y;
+    if (kind === 'cell') {
+      if (x < contentLeft + stickyLeftWidth) cx = contentLeft + stickyLeftWidth + 1;
+      if (y < contentTop + stickyTopHeight) cy = contentTop + stickyTopHeight + 1;
+    } else if (kind === 'row') {
+      cx = contentLeft + Math.min(stickyLeftWidth - 1, stickyLeftWidth / 2);
+      // Same y-clamp as 'cell' above: the pointer during a row-header drag
+      // held straight up toward row 1 is naturally sitting inside the
+      // sticky thead band (that's the direction it's being dragged), which
+      // hit-tests to a thead <th>, not the tbody <th> this kind needs --
+      // without also pushing y past it here, the drag freezes just short
+      // of row 1 even though scrollTop correctly reaches 0.
+      if (y < contentTop + stickyTopHeight) cy = contentTop + stickyTopHeight + 1;
+    } else {
+      cy = contentTop + Math.min(stickyTopHeight - 1, stickyTopHeight / 2);
+      // Transposed counterpart: a col-header drag held toward column A is
+      // naturally sitting inside the sticky row-header column, which
+      // hit-tests to that column (or the top-left CORNER <th> -- see
+      // `matches` above) instead of a real column-header <th>.
+      if (x < contentLeft + stickyLeftWidth) cx = contentLeft + stickyLeftWidth + 1;
+    }
+    if (cx === x && cy === y) return first; // clamping wouldn't change anything -- nothing more to try
+    return document.elementFromPoint(cx, cy);
   }
 
   _renderCell(ref) {
@@ -979,8 +2191,9 @@ export class Grid {
    * _build() rebuild (setCellValue, applyRemote's non-structural cell
    * branch, _clearSelection, USERINFO's direct-mutation renders) --
    * anything that already triggers _build() (merge/unmerge, remote
-   * structural patches, insert/delete row/col) re-renders every cell via
-   * _renderAll() regardless, so dependents are already covered there.
+   * structural patches, insert/delete row/col) re-renders every mounted
+   * cell via _build()'s fresh _renderWindow() mount regardless, so
+   * dependents are already covered there.
    */
   _recalcDependents(changedRefs) {
     const dependents = this._buildDependents();
@@ -1015,52 +2228,86 @@ export class Grid {
     if (e.button !== 0) return;
     if (e.target.closest('.col-resize-handle') || e.target.closest('.row-resize-handle')) return;
     const td = e.target.closest('td');
-    if (!td) return;
+    // A spacer <td> (see _renderWindow/_makeSpacerRow) stands in for a
+    // whole range of currently-unmounted rows/columns -- it has no
+    // dataset.ref (no single cell it represents), so treat a hit on one
+    // the same as no cell at all rather than selecting `undefined`.
+    if (!td || !td.dataset.ref) return;
     // Stop native text-selection/drag-highlight; our own selection
     // handling below is what should happen instead.
     e.preventDefault();
     this._dragging = true;
+    this._lastPointerXY = { x: e.clientX, y: e.clientY };
+    this._startDragAutoScroll();
     this._select(td.dataset.ref, e.shiftKey);
   }
 
   _onMouseMoveDrag(e) {
+    // Kept fresh on every drag-relevant move regardless of which branch
+    // below actually applies -- _dragAutoScrollTick (see there) reads this
+    // on an interval, independent of whether mousemove itself keeps firing.
+    if (this._dragging || this._headerDragging) this._lastPointerXY = { x: e.clientX, y: e.clientY };
     // Dragging across row/col headers (started by _onRowHeaderMouseDown/
     // _onColHeaderMouseDown below) extends a whole-row/whole-column
     // selection instead of the plain cell-range drag below -- same
     // mousemove listener, different branch, since both need "which header
     // is the pointer over right now" from the same event.
     if (this._headerDragging === 'row') {
-      const th = e.target.closest('tbody th');
+      // e.target alone (rather than _resolveDragTarget) is only reliable
+      // while the pointer stays on the narrow header track itself -- a
+      // natural diagonal drag easily carries it off that track onto the
+      // data grid instead, which would otherwise silently freeze the
+      // row-header drag's selection. See _resolveDragTarget's doc comment.
+      const el = this._resolveDragTarget('row', e.clientX, e.clientY);
+      const th = el && el.closest('tbody th');
       if (th && th.dataset.rowIndex !== undefined) this.selectWholeRow(Number(th.dataset.rowIndex), true);
       return;
     }
     if (this._headerDragging === 'col') {
-      const th = e.target.closest('thead th');
+      const el = this._resolveDragTarget('col', e.clientX, e.clientY);
+      const th = el && el.closest('thead th');
       if (th && th.dataset.colIndex !== undefined) this.selectWholeColumn(Number(th.dataset.colIndex), true);
       return;
     }
     if (!this._dragging) return;
-    const td = e.target.closest('td');
-    if (!td || td.dataset.ref === this.selected) return;
+    // A plain cell-range drag held near the left/top viewport edge (right
+    // where auto-scroll engages, see _dragAutoScrollTick) is routinely
+    // over the sticky row-header/column-header overlay instead of a <td>
+    // -- e.target alone would silently stop extending the selection there
+    // even though auto-scroll keeps running. See _resolveDragTarget.
+    const el = this._resolveDragTarget('cell', e.clientX, e.clientY);
+    const td = el && el.closest('td');
+    if (!td || !td.dataset.ref || td.dataset.ref === this.selected) return;
     this.selected = td.dataset.ref;
     this._highlightRange(this.anchor, this.selected);
     if (this.onSelectionChange) this.onSelectionChange(this.selected);
   }
 
   _onMouseUp() {
+    // Reset once this mouse gesture is fully over -- otherwise a stale
+    // right-click button value could keep suppressing _onContainerFocus's
+    // auto-select cascade for an unrelated LATER focus event (e.g. Tab)
+    // that had nothing to do with a mousedown at all. Safe to clear here
+    // regardless of mouseup-vs-contextmenu firing order for the SAME
+    // right-click gesture -- _onContainerFocus already ran (or didn't)
+    // synchronously as part of that mousedown's own default action, well
+    // before either mouseup or contextmenu fires.
+    this._lastMouseDownButton = null;
     if (this._headerDragging) {
       this._headerDragging = null;
+      this._stopDragAutoScroll();
       this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
       return;
     }
     if (!this._dragging) return;
     this._dragging = false;
+    this._stopDragAutoScroll();
     this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
   }
 
   _onCellDblClick(e) {
     const td = e.target.closest('td');
-    if (!td || this.readOnly) return;
+    if (!td || !td.dataset.ref || this.readOnly) return;
     this._beginEdit(td.dataset.ref);
   }
 
@@ -1082,7 +2329,10 @@ export class Grid {
    * collapsed to just the row that happened to be right-clicked).
    */
   _onContextMenu(e) {
-    const cellTd = e.target.closest('td');
+    const cellTdHit = e.target.closest('td');
+    // A spacer <td> (see _renderWindow) has no dataset.ref -- treat it as
+    // no cell hit, same as the guards on the mouse/touch handlers above.
+    const cellTd = cellTdHit && cellTdHit.dataset.ref ? cellTdHit : null;
     const rowTh = e.target.closest('tbody th');
     const colTh = e.target.closest('thead th');
     if (!cellTd && !rowTh && !colTh) return;
@@ -1169,6 +2419,11 @@ export class Grid {
     const lastCol = colLetter(this.cols - 1);
     this.anchor = 'A' + (this._headerAnchorRow + 1);
     this.selected = lastCol + (rowIndex + 1);
+    // Vertical scroll only -- `this.selected` here is the far-right column
+    // of the row, not a meaningful horizontal target (a whole-row selection
+    // has no single "correct" horizontal scroll position); `rowIndex` is
+    // what actually needs to be visible.
+    this._scrollRowIntoView(rowIndex);
     this._highlightRange(this.anchor, this.selected);
     if (this.onSelectionChange) this.onSelectionChange(this.selected);
   }
@@ -1180,6 +2435,9 @@ export class Grid {
     }
     this.anchor = colLetter(this._headerAnchorCol) + '1';
     this.selected = colLetter(colIndex) + this.rows;
+    // Horizontal scroll only -- see selectWholeRow's comment above (same
+    // reasoning, transposed).
+    this._scrollColIntoView(colIndex);
     this._highlightRange(this.anchor, this.selected);
     if (this.onSelectionChange) this.onSelectionChange(this.selected);
   }
@@ -1188,6 +2446,8 @@ export class Grid {
     if (e.button !== 0) return; // right-click is handled by _onContextMenu, don't also start a drag-select
     e.preventDefault();
     this._headerDragging = 'row';
+    this._lastPointerXY = { x: e.clientX, y: e.clientY };
+    this._startDragAutoScroll();
     this.selectWholeRow(rowIndex, e.shiftKey);
   }
 
@@ -1195,6 +2455,8 @@ export class Grid {
     if (e.button !== 0) return;
     e.preventDefault();
     this._headerDragging = 'col';
+    this._lastPointerXY = { x: e.clientX, y: e.clientY };
+    this._startDragAutoScroll();
     this.selectWholeColumn(colIndex, e.shiftKey);
   }
 
@@ -1223,7 +2485,8 @@ export class Grid {
     if (e.touches.length !== 1) return; // ignore pinch-zoom/multi-touch entirely
     if (e.target.closest('.col-resize-handle') || e.target.closest('.row-resize-handle')) return;
     const td = e.target.closest('td');
-    if (!td) return;
+    // See _onMouseDown's comment -- a spacer <td> has no dataset.ref.
+    if (!td || !td.dataset.ref) return;
     const touch = e.touches[0];
     this._armTouchDragCandidate({ kind: 'cell', ref: td.dataset.ref }, touch);
   }
@@ -1248,6 +2511,8 @@ export class Grid {
       const c = this._touchDragCandidate;
       if (!c) return;
       c.armed = true;
+      this._lastPointerXY = { x: c.x, y: c.y };
+      this._startDragAutoScroll();
       if (c.kind === 'cell') {
         this._dragging = true;
         this._select(c.ref, false);
@@ -1350,7 +2615,10 @@ export class Grid {
     // behavior rather than also popping the context menu.
     clearTimeout(this._touchLongPressTimer);
     e.preventDefault();
-    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    this._lastPointerXY = { x: touch.clientX, y: touch.clientY };
+    // See _resolveDragTarget's doc comment -- same sticky-header-overlay
+    // hit-test problem applies to a touch drag as to a mouse one.
+    const el = this._resolveDragTarget(c.kind === 'cell' ? 'cell' : c.kind, touch.clientX, touch.clientY);
     if (!el) return;
     if (c.kind === 'row') {
       const th = el.closest('tbody th');
@@ -1360,7 +2628,7 @@ export class Grid {
       if (th && th.dataset.colIndex !== undefined) this.selectWholeColumn(Number(th.dataset.colIndex), true);
     } else {
       const td = el.closest('td');
-      if (td && td.dataset.ref !== this.selected) {
+      if (td && td.dataset.ref && td.dataset.ref !== this.selected) {
         this.selected = td.dataset.ref;
         this._highlightRange(this.anchor, this.selected);
         if (this.onSelectionChange) this.onSelectionChange(this.selected);
@@ -1388,6 +2656,7 @@ export class Grid {
     const c = this._touchDragCandidate;
     this._touchDragCandidate = null;
     if (!c || !c.armed) return;
+    this._stopDragAutoScroll();
     if (this._headerDragging) {
       this._headerDragging = null;
       this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: this.selected } }));
@@ -1426,6 +2695,13 @@ export class Grid {
     if (this.editingInput) this._commitEdit();
     this.anchor = extend && this.anchor ? this.anchor : ref;
     this.selected = ref;
+    // Scroll BEFORE highlighting -- a newly-selected ref reached via
+    // keyboard traversal (_moveSelection) or programmatic selection
+    // (_onContainerFocus) is routinely off-screen under windowing, with no
+    // live <td> yet; _scrollRefIntoView mounts it (via _renderWindow) if a
+    // scroll was actually needed, so _highlightRange right after has a
+    // real element to add .selected to instead of silently no-op'ing.
+    this._scrollRefIntoView(ref);
     this._highlightRange(this.anchor, this.selected);
     this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref } }));
     if (this.onSelectionChange) this.onSelectionChange(ref);
@@ -1856,6 +3132,9 @@ export class Grid {
     if (this.readOnly || !this.anchor || !this.selected) return { ok: false, error: 'Nothing selected' };
     const refs = this._rangeRefs(this.anchor, this.selected);
     if (refs.length < 2) return { ok: false, error: 'Select more than one cell to merge' };
+    // See _captureScrollAnchor's doc comment -- merging doesn't change
+    // this.rows/this.cols at all, so no index remap is needed on restore.
+    const scrollAnchor = this._captureScrollAnchor();
 
     const pa = parseRef(this.anchor);
     const pb = parseRef(this.selected);
@@ -1885,6 +3164,7 @@ export class Grid {
     this.cells[origin] = { ...prev, merge: { rows, cols } };
     this.onChange({ cells: { [origin]: { merge: { rows, cols } } } });
     this._build();
+    this._restoreScrollAnchor(scrollAnchor);
     return { ok: true };
   }
 
@@ -1894,10 +3174,13 @@ export class Grid {
     if (!origin || !this.cells[origin] || !this.cells[origin].merge) {
       return { ok: false, error: 'Selection is not a merged cell' };
     }
+    // See mergeSelection's comment -- unmerging doesn't renumber rows/cols either.
+    const scrollAnchor = this._captureScrollAnchor();
     const { merge, ...rest } = this.cells[origin];
     this.cells[origin] = rest;
     this.onChange({ cells: { [origin]: { merge: null } } });
     this._build();
+    this._restoreScrollAnchor(scrollAnchor);
     return { ok: true };
   }
 
@@ -1958,6 +3241,18 @@ export class Grid {
    *    _diffKeyedMap) and emits it via onChange, then rebuilds.
    */
   _transformStructure(dimension, boundaryIndex, count, isInsert) {
+    // Captured before anything below mutates this.rows/this.cols/
+    // rowHeights/columnWidths -- see _captureScrollAnchor's doc comment
+    // for why the raw scrollTop/scrollLeft alone can't just be replayed
+    // back unchanged after _build() runs. Unlike merge/unmerge (which
+    // never renumber rows/cols), an insert/delete here genuinely shifts
+    // indices around -- the remap below (mirroring the same idx ->
+    // newIdx logic this function already applies to every cell position)
+    // accounts for that, so a user scrolled past the boundary lands back
+    // on the SAME content, not just the same raw pixel offset (which would
+    // now show different rows/columns after the shift).
+    const scrollAnchor = this._captureScrollAnchor();
+    const remapIndex = (idx) => this._remapStructuralIndex(idx, boundaryIndex, count, isInsert);
     const newCells = {};
     for (const [ref, cell] of Object.entries(this.cells)) {
       const p = parseRef(ref);
@@ -2073,8 +3368,16 @@ export class Grid {
     this.selected = null;
     this._headerAnchorRow = null;
     this._headerAnchorCol = null;
-    this.onChange(patch);
+    // Second arg: see applyRemote's doc comment -- ws.js/ws-server thread
+    // this through as a sibling of the merge-patch payload (never merged
+    // into it, never persisted) purely so every OTHER connected viewer's
+    // applyRemote() can remap ITS OWN scroll anchor the same way this
+    // (the local, sending) client remaps its own scrollAnchor right below.
+    this.onChange(patch, { dimension, boundaryIndex, count, isInsert });
     this._build();
+    const newRowIndex = scrollAnchor && dimension === 'row' ? remapIndex(scrollAnchor.rowIndex) : undefined;
+    const newColIndex = scrollAnchor && dimension === 'col' ? remapIndex(scrollAnchor.colIndex) : undefined;
+    this._restoreScrollAnchor(scrollAnchor, newRowIndex, newColIndex);
   }
 
   /**
