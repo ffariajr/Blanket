@@ -2493,13 +2493,24 @@ export class Grid {
 
   _onRowHeaderTouchStart(e, rowIndex) {
     if (e.touches.length !== 1) return;
-    if (e.target.closest('.row-resize-handle')) return;
+    // Unlike _onMouseDown/_onTouchStart's resize-handle guards, this does
+    // NOT bail out when the touch lands on .row-resize-handle: that span
+    // has no touchstart listener of its own (resize is mouse-drag-only,
+    // see _rowResizeHandle), so a real touch there would otherwise be
+    // silently swallowed instead of drag-selecting the row it visually
+    // sits inside -- Chrome's real touch hit-testing (distinct from
+    // elementFromPoint) routes touches near a header's trailing edge to
+    // this thin handle even though _onRowHeaderTouchStart is what's
+    // listening on the <th> itself. Since there's no competing
+    // touch-resize feature to protect, treat it the same as any other
+    // touch on the header. See BUGS_FOUND.md [037].
     this._armTouchDragCandidate({ kind: 'row', index: rowIndex }, e.touches[0]);
   }
 
   _onColHeaderTouchStart(e, colIndex) {
     if (e.touches.length !== 1) return;
-    if (e.target.closest('.col-resize-handle')) return;
+    // See _onRowHeaderTouchStart's comment above (same reasoning,
+    // transposed to .col-resize-handle).
     this._armTouchDragCandidate({ kind: 'col', index: colIndex }, e.touches[0]);
   }
 
