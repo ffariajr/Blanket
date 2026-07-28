@@ -32,6 +32,16 @@ function isLoggedIn() {
   return isSessionValid();
 }
 
+// Is this a touch-capable device (phone/tablet), as opposed to a
+// mouse-driven desktop? Used to omit desktop-only affordances that make no
+// sense on touch -- e.g. "Show browser menu" in the context menus below,
+// which falls through to a native right-click menu that doesn't exist on a
+// device with no right-click at all. Checked live (not cached) since it's
+// cheap and this app has no other call site for it yet.
+function isTouchDevice() {
+  return ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+}
+
 function formatRelativeTime(date) {
   const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
   if (seconds < 10) return 'just now';
@@ -146,6 +156,21 @@ async function resolveTabByOrdinal(spreadsheetId, ordinal) {
 // etc.) -- those are completely unaffected.
 let spreadsheetReturnUrl = null;
 
+// True for exactly as long as the required Welcome name-prompt modal (see
+// promptForNameIfNeeded) is open and unanswered -- set the instant it's
+// created/appended, cleared the instant it resolves/removes itself (both
+// the normal Continue-submit path AND the "Log in instead" bypass button's
+// own removal). BUGS_FOUND.md [040]: a prior fix only re-triggered the
+// prompt when re-entering a SPREADSHEET-context route (route()'s own gate
+// above), but ANY hashchange/popstate while the modal is still open --
+// including navigation to a completely different, non-spreadsheet route --
+// could render new content underneath the still-open, still-blocking
+// modal. route() itself checks this flag first thing and bails out
+// entirely while it's true; the still-open modal triggers its own fresh
+// route() call once it resolves (exactly like boot()'s trailing route()
+// call today), so nothing is lost by skipping this one.
+let nameModalOpen = false;
+
 // Mirrors route()'s own URL-parsing branches for exactly one question: is
 // this hash/path combination a spreadsheet-context route (one of the
 // branches below that ends up calling renderSheet/renderNoTabs), as
@@ -164,6 +189,14 @@ function isSpreadsheetVisit() {
 }
 
 async function route() {
+  // Hard gate, BUGS_FOUND.md [040]: while the required Welcome name-prompt
+  // modal is still open and unanswered, no hashchange/popstate-driven
+  // navigation -- of ANY kind, not just back to a spreadsheet route -- may
+  // render new content underneath it (see nameModalOpen's own doc comment
+  // above). The modal re-invokes route() itself once it resolves, so this
+  // navigation is simply dropped, not lost.
+  if (nameModalOpen) return;
+
   const parts = parseHash();
 
   // A hash-based navigation (an internal link click, or the numeric/old
@@ -318,11 +351,18 @@ async function renderSheetsList() {
 
       // The viewer owns every row in this list -- always "Duplicate" (asks
       // about sharing settings first, since only an owner can see/copy the
-      // sharing list -- Permissions::canManage()).
+      // sharing list -- Permissions::canManage()). A real 3-way choice
+      // (showChoice, not showConfirm) -- either sharing option proceeds,
+      // but Cancel genuinely aborts with nothing happening, unlike the
+      // former yes/no sub-question that always duplicated either way.
       li.appendChild(el('button', {
         class: 'btn btn-small',
         onclick: async () => {
-          const shareToo = await showConfirm("Also duplicate this spreadsheet's sharing settings?", { confirmLabel: 'Yes', cancelLabel: 'No' });
+          const shareToo = await showChoice('Duplicate this spreadsheet?', [
+            ['Duplicate with sharing settings', true],
+            ['Duplicate without sharing', false],
+          ]);
+          if (shareToo === null) return;
           await api.duplicateSpreadsheet(s.id, shareToo);
           await refresh();
         },
@@ -641,7 +681,12 @@ async function renderSheet(spreadsheetId, tabId) {
   const formulaRefLabel = el('span', { class: 'formula-ref' }, '');
   const formulaInput = el('input', {
     type: 'text', class: 'formula-input', placeholder: 'Select a cell to edit its value or formula',
-    disabled: readOnly || null,
+    // grid.selected is always null at this point (Grid's constructor above
+    // starts unselected, and nothing here has clicked a cell yet), so this
+    // is unconditionally disabled at first render regardless of readOnly --
+    // updateFormulaInputDisabled() (below) takes over the instant a
+    // selection exists.
+    disabled: readOnly || !grid.selected || null,
     onkeydown: (e) => {
       // stopPropagation matters here: blur() below moves focus synchronously,
       // so by the time this keydown would otherwise bubble to grid.js's
@@ -660,6 +705,19 @@ async function renderSheet(spreadsheetId, tabId) {
     class: 'btn btn-secondary btn-icon', type: 'button', title: 'Formula help', 'aria-label': 'Formula help',
     onclick: () => showFormulaHelp(),
   }, '?');
+  // Effective-read-only-or-unselected -> formulaInput.disabled, computed in
+  // one place so it can never drift out of sync between its two triggers:
+  // formulaBar.onSelect (selection changes, including to/from no selection
+  // at all -- Fernando, real-device report: "when switching tabs, before a
+  // cell is selected, the formula bar should not be selectable or
+  // editable") and applyCongestionState (the effective-read-only state
+  // itself changing). congestionViewOnly is declared further down (`let`,
+  // same closure) -- safe to reference here since this is only ever
+  // actually invoked well after that declaration runs, same reasoning as
+  // onSelectionChange's own reference to `socket` below.
+  function updateFormulaInputDisabled() {
+    formulaInput.disabled = readOnly || congestionViewOnly || !grid.selected;
+  }
   const formulaBar = {
     el: el('div', { class: 'formula-bar' }, [formulaRefLabel, formulaInput, formulaHelpBtn]),
     onSelect: (ref) => {
@@ -667,6 +725,7 @@ async function renderSheet(spreadsheetId, tabId) {
       if (document.activeElement !== formulaInput) {
         formulaInput.value = ref && grid.cells[ref] ? (displayableCellValue(grid.cells[ref].value) || '') : '';
       }
+      updateFormulaInputDisabled();
     },
   };
   // Reflects the current selection's actual rendered font in the toolbar's
@@ -830,7 +889,7 @@ async function renderSheet(spreadsheetId, tabId) {
     congestionViewOnly = isViewOnly;
     const effectiveReadOnly = readOnly || congestionViewOnly;
     grid.setReadOnly(effectiveReadOnly);
-    formulaInput.disabled = effectiveReadOnly;
+    updateFormulaInputDisabled();
     toolbar.querySelectorAll('[data-edit-control]').forEach((control) => {
       control.disabled = effectiveReadOnly;
     });
@@ -1090,6 +1149,45 @@ function showConfirm(message, { confirmLabel = 'OK', cancelLabel = 'Cancel' } = 
     ]);
     document.body.appendChild(dialog);
     wireModalA11y(dialog, confirmBtn, () => finish(false));
+  });
+}
+
+/**
+ * Generalizes showConfirm() to a real N-way choice (plus a genuine Cancel)
+ * instead of a plain yes/no -- for cases where the underlying action itself
+ * is optional, not just some detail of how to perform it (see "Duplicate"
+ * in renderSheetsList, BUGS_FOUND.md iPhone-testing fix: asking only
+ * "include sharing settings or not" left no way to decline duplicating at
+ * all). `options` is an array of [label, value] pairs, each rendered as its
+ * own button that resolves the returned Promise to that value. Cancel,
+ * Escape, and backdrop-click all resolve to null -- the one true "abort,
+ * nothing happens" outcome, distinct from any listed option's value (so
+ * options should never use null as a real value).
+ */
+function showChoice(message, options, cancelLabel = 'Cancel') {
+  return new Promise((resolve) => {
+    let settled = false;
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      dialog.remove();
+      resolve(result);
+    }
+    const optionBtns = options.map(([label, value]) => el('button', {
+      class: 'btn', type: 'button', onclick: () => finish(value),
+    }, label));
+    const dialog = el('div', {
+      class: 'modal',
+      onclick: (e) => { if (e.target === dialog) finish(null); },
+    }, [
+      el('div', { class: 'modal-content' }, [
+        el('p', {}, message),
+        ...optionBtns,
+        el('button', { class: 'btn btn-secondary', type: 'button', onclick: () => finish(null) }, cancelLabel),
+      ]),
+    ]);
+    document.body.appendChild(dialog);
+    wireModalA11y(dialog, optionBtns[0], () => finish(null));
   });
 }
 
@@ -1467,7 +1565,9 @@ function showCellContextMenu(x, y, grid) {
       ['Clear contents', () => grid._clearSelection()],
     );
   }
-  items.push(nativeMenuEscapeItem(grid, x, y));
+  // No native right-click menu to fall through to on a touch device -- see
+  // isTouchDevice().
+  if (!isTouchDevice()) items.push(nativeMenuEscapeItem(grid, x, y));
   showContextMenuAt(x, y, items);
 }
 
@@ -1498,7 +1598,7 @@ function showHeaderContextMenu(x, y, grid, kind, index) {
     [`Insert ${count} column${count > 1 ? 's' : ''} right`, () => grid.insertColumnsAt(end + 1, count)],
     [`Delete column${count > 1 ? 's' : ''}`, () => grid.deleteColumnsAt(start, count)],
   ];
-  items.push(nativeMenuEscapeItem(grid, x, y));
+  if (!isTouchDevice()) items.push(nativeMenuEscapeItem(grid, x, y));
   showContextMenuAt(x, y, items);
 }
 
@@ -1853,6 +1953,7 @@ function promptForNameIfNeeded() {
               return;
             }
             setDisplayName(name);
+            nameModalOpen = false;
             dialog.remove();
             resolve();
           },
@@ -1863,6 +1964,7 @@ function promptForNameIfNeeded() {
             class: 'link', type: 'button',
             onclick: () => {
               spreadsheetReturnUrl = window.location.pathname + window.location.search + window.location.hash;
+              nameModalOpen = false;
               dialog.remove();
               window.location.hash = '#/login';
             },
@@ -1870,6 +1972,7 @@ function promptForNameIfNeeded() {
         ]),
       ]),
     ]);
+    nameModalOpen = true;
     document.body.appendChild(dialog);
     input.focus();
   });
