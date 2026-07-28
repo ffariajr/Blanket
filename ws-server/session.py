@@ -118,8 +118,63 @@ class TabSession:
                 del self.__class__._sessions[self.tab_id]
                 logger.info("session closed tab_id=%s", self.tab_id)
 
+    async def _refresh_if_stale(self):
+        """Re-checks self.data/self.sequence against the DB's actual
+        current row for this tab_id, refetching if the DB has moved ahead
+        -- see BUGS_FOUND.md [038]. Only ever called right before serving
+        the initial "state" message to a newly-connecting client (from
+        add_client); nothing else needs it, since every OTHER way
+        self.data changes (handle_new_edit, _flush_if_dirty) already goes
+        through this same in-memory session, never around it.
+
+        Skips the refetch entirely while `dirty` -- an unflushed local
+        edit is already more current than anything the DB has on disk, and
+        clobbering it here would silently discard that edit instead of the
+        stale-cache bug this exists to fix. This does mean a REST write
+        that lands *during* an active, still-unflushed WS editing session
+        can still race with this session's own next persist (a separate,
+        pre-existing architectural gap between the REST and WS write
+        paths, not something a connect-time cache check can resolve on its
+        own) -- but that's a fundamentally different scenario from the one
+        confirmed here: a cache that goes stale, then gets served verbatim
+        to a client connecting/reconnecting afterward, with no pending
+        edit of its own to protect.
+
+        Also guards against a second race: another task (a concurrent
+        client's own new_edit, or this same tab's debounced persist) can
+        run between this method's `await` and its return, since asyncio
+        can only interleave at an await point -- so the fetched copy is
+        only actually applied if `sequence`/`dirty` are unchanged from
+        right before the DB round-trip; otherwise something more current
+        already exists in memory and the fetch is just discarded.
+        """
+        if self.dirty:
+            return
+        sequence_before = self.sequence
+        loop = asyncio.get_running_loop()
+        db_sequence, db_data = await loop.run_in_executor(None, db.fetch_current_state, self.tab_id)
+        if db_sequence <= sequence_before:
+            return
+        if self.dirty or self.sequence != sequence_before:
+            return
+        logger.info(
+            "session cache stale tab_id=%s cached_sequence=%s db_sequence=%s -- refetching",
+            self.tab_id, sequence_before, db_sequence,
+        )
+        self.sequence = db_sequence
+        self.data = db_data
+
     async def add_client(self, ws, client_info, presence):
         self.presence = presence
+        # BUGS_FOUND.md [038]: a REST-only write that never touches this
+        # process at all (CsvController::import(), any future one like it)
+        # has no way to invalidate self.data/self.sequence once they're
+        # cached -- so before trusting the cache enough to serve it to a
+        # newly-arriving client, re-check it against the DB's actual
+        # current row every time. Cheap (one indexed lookup) relative to
+        # correctness, and a no-op in the overwhelming common case where
+        # nothing bypassed this session while it was live.
+        await self._refresh_if_stale()
         # _admit_editor (the capacity check + its commit) and adding this
         # client to self.clients must happen back-to-back with no `await`
         # in between -- otherwise a concurrently-arriving connection's own
