@@ -915,7 +915,7 @@ Everything else in the USERINFO new-signature end-to-end dimension checked out c
   Test data cleanup: deleted spreadsheets (ids 14637, 14642, 14646, 14648, 14649), their tabs and `spreadsheet_history` rows, and user id 434, all by exact ID, verified zero rows remain post-cleanup. Spreadsheet id=13 was never touched.
 
   Severity assessment: "low" is reasonable — it's a real accessibility/consistency gap relative to the app's own documented and otherwise-consistent Escape-to-dismiss pattern, but the dialog remains fully dismissible via backdrop click (verified working) or by submitting the form, so there's no dead-end/trapped state, just a missing convenience path.
-- **Status:** open
+- **Status:** fixed (commit `081428a`)
 
 ### [043] Grid virtualization structural insert/delete now shows a growing (and occasionally direction-reversed) scroll-anchor drift, distinct from the already-fixed [039] self-echo bug — root cause is `DEFAULT_ROW_HEIGHT=28` not matching the true rendered row pitch of 33px
 
@@ -949,7 +949,7 @@ Everything else in the USERINFO new-signature end-to-end dimension checked out c
   - The real header-context-menu UI path (genuine mouse right-click + a real click on the rendered "Insert 1 row above" menu item, not a programmatic call) for INSERT, at both depths: content at the fixed pixel is preserved (`textPreserved: true`) in both cases.
   - Confirmed (by working through the remap logic in `_transformStructure`'s shared boundary/count/isInsert remapping, used by both the local edit path and `applyRemote`'s remote-viewer remapping) that DELETE's "entirely past the deleted range, shift back" compensating case can only ever be reached with a boundary strictly above the current scroll-anchor row — which is never reachable by clicking a *visible* row header locally (a visible header's index is always >= the anchor's own row), only via a remote peer's delete of rows above what this viewer has scrolled to. Right-clicking a visible header locally always lands in the "boundary at/after the anchor" (insert) or "anchor's own row consumed by the delete" (delete) case instead, where no compensating scroll is mathematically expected — confirmed this is exactly what happens (not a residual bug) by testing both a single-row and an explicit multi-row (`selectWholeRow` range 5-35) local delete through the real menu UI.
   - Test data: created via `bin/create-admin.php` (`wftest_e88b474e`, id 458) and the REST API against the local instance, 10 throwaway spreadsheets (ids 14733-14742, one per script iteration/retry) + their tabs (ids 2362-2371) — all by exact ID, `spreadsheet_history`/`tabs`/`spreadsheet_access`/`spreadsheets`/`users` rows confirmed at 0 remaining after cleanup. Never touched spreadsheet id=13.
-- **Status:** fixed (commit `51e21d3`)
+- **Status:** fixed (commit `760b23d`)
 
 ### [044] Merge-with-non-origin-content correctly refuses via a blocking native alert rather than silently discarding data — confirmed working as intended, logged for traceability only (no defect)
 
@@ -1021,7 +1021,7 @@ Given (a) no plausible server-side mechanism exists under this app's actual exec
   Cleanup performed: all throwaway data deleted by exact ID and verified gone afterward — spreadsheets 14644/14645/14650, tabs 2273/2274/2279 (and their `spreadsheet_history` rows), and test user id 433 (`wftest_496fc17c`). Spreadsheet id=13 was never touched.
 
   Verdict: CONFIRMED — high severity is justified. This is a real, silent-wrong-answer bug in a very common formula pattern (comparison against a not-yet-filled-in numeric cell), reproducible identically via pure-logic inspection of the deployed source and via live interaction with the production app in a real browser.
-- **Status:** open
+- **Status:** fixed (commit `7e7c9a0`)
 
 ### [046] ROUND() silently clamps a negative "digits" argument to 0 instead of rounding to tens/hundreds/etc. — `ROUND(1234.5,-1)` returns 1235 instead of 1230
 
@@ -1053,7 +1053,7 @@ Given (a) no plausible server-side mechanism exists under this app's actual exec
   Severity assessment: "medium" is agreed — a silent, undetected correctness bug (no error/warning) in a documented Excel-parity feature, but scoped to one function's one argument form (negative digits), not a broad-impact or data-loss issue.
 
   Files relevant: `/home/claude/blanket/assets/js/formulas.js` (line 441, the ROUND case in `applyScalarFn`).
-- **Status:** open
+- **Status:** fixed (commit `7e7c9a0`)
 
 ### [047] Non-numeric text used in arithmetic still renders the literal raw "NaN" to the user instead of a clear error indicator — same symptom class as the already-fixed [010], but for a different (more common) trigger not covered by that fix
 
@@ -1079,7 +1079,7 @@ Given (a) no plausible server-side mechanism exists under this app's actual exec
   Cleanup performed: deleted `spreadsheet_history` rows for tab_id 2261, tab id 2261, spreadsheet id 14632, and user id 439. All confirmed 0 rows remaining afterward. Spreadsheet id=13 was never touched.
 
   Files referenced: `/home/claude/blanket/assets/js/formulas.js` (`arithNumber` at ~line 490, `evaluateFormula` at ~line 177, `applyScalarFn`/ROUND/ABS at ~line 438-446).
-- **Status:** open
+- **Status:** fixed (commit `7e7c9a0`)
 
 ### [048] "Saved X ago" indicator is permanently off by ~5 hours on every fresh page load, because the frontend parses the server's `created_at` timestamp as UTC when the DB host actually stores it in local system time
 
@@ -1111,7 +1111,7 @@ Given (a) no plausible server-side mechanism exists under this app's actual exec
   Files/paths referenced: `/home/claude/blanket/assets/js/app.js` (line 571, and `formatRelativeTime` at lines 45-54), `/home/claude/blanket/db/schemas.md` (`created_at` column definitions), `/home/claude/blanket/TESTING_PLAN.md` (Ground Rules followed).
 
   **Fix (this pass):** root cause confirmed directly against the live DB via `Blanket\Db`: `SELECT NOW(), UTC_TIMESTAMP(), @@session.time_zone` returned `sess_tz='SYSTEM'` and `db_now` ~5h behind `UTC_TIMESTAMP()` -- the connection never set an explicit session time zone, so TIMESTAMP columns (stored internally in UTC) were rendered to/from the server's local wall clock on every read/write. Fixed in `src/Db.php`'s `Db::connection()` by running `SET time_zone = '+00:00'` immediately after connecting, so `CURRENT_TIMESTAMP` and every `created_at` read back are genuinely UTC going forward, matching the frontend's existing UTC assumption at `app.js:571`. Does not backfill pre-existing rows (out of scope, by design -- see reproduction detail above). Deployed and verified end-to-end: created a fresh throwaway spreadsheet (`wftest_sheet_745d6c8e`, as user `wftest_0c42e162`/id=457) via real headless Chromium against production; topbar showed "Saved just now"; cross-checked directly against the DB, `spreadsheet_history` id=14452's `created_at` was `2026-07-28 21:53:32` against `UTC_TIMESTAMP()` of `2026-07-28 21:53:41` at query time (real `date -u` also confirmed true UTC in that window) -- within a few seconds, no ~5h skew. Cleaned up by exact ID: `spreadsheet_history` id=14452, `tabs` id=2361, `spreadsheets` id=14732, `users` id=457 (verified gone). Pre-existing rows written before this fix (e.g. anything checked prior to this deploy) will still display incorrectly, as expected.
-- **Status:** fixed (commit `ebb278f`)
+- **Status:** fixed (commit `480f1df`)
 
 ### [049] Rename-spreadsheet and Rename-tab dialogs also don't close on Escape (only backdrop-click works) — same `wireModalA11y()`-not-applied root cause already named as related context in [041]/[042]
 
@@ -1142,4 +1142,4 @@ Given (a) no plausible server-side mechanism exists under this app's actual exec
   Cleanup: the throwaway spreadsheet (id 14635), tab (id 2264), and its history were deleted successfully by exact ID, verified 0 remaining. Deleting the throwaway user (id 435) was blocked by a `spreadsheet_history.saved_by` foreign-key from an unrelated spreadsheet (id 14633 "wftest-merge-021c9d", tab 2262, also `owner_id=435`) not created by this agent — apparently a concurrently-running sibling test agent's data in this same shared testing round. Per the ground rules on concurrent test-data collisions, user id 435 was left undeleted rather than deleting unrecognized data that might belong to an in-progress sibling agent. Spreadsheet id=13 ("Test", `owner_id=15`) was confirmed untouched throughout (title, `owner_id`, `deleted_at` all unchanged).
 
   Relevant files: `/home/claude/blanket/assets/js/app.js` (`showRenameSpreadsheet` ~1694, `showRenameTab` ~1733, `wireModalA11y` ~1093), `/home/claude/blanket/BUGS_FOUND.md` ([041]/[042] entries), `/home/claude/blanket/TESTING_PLAN.md` (ground rules).
-- **Status:** open
+- **Status:** fixed (commit `081428a`)
