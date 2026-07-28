@@ -654,7 +654,6 @@ table.grid th { position: relative; }
   cursor: col-resize;
   z-index: 4;
 }
-.col-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
 .row-resize-handle {
   position: absolute;
   left: 0; right: 0; bottom: 0;
@@ -662,7 +661,24 @@ table.grid th { position: relative; }
   cursor: row-resize;
   z-index: 4;
 }
-.row-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
+/* Only a device with genuine hover capability (a mouse) gets the
+   thicker-border affordance -- touch resize was never implemented (see
+   _onTouchStart's deliberate touch-lands-on-a-resize-handle fallthrough
+   to normal drag-select), so showing this same "you can drag this"
+   affordance on a touch tap would be misleading: real iPhone testing
+   found a tap on the handle lights up this hover style, then the
+   fallthrough drag-select takes over and grows the selection instead of
+   resizing anything, with no visual explanation of why. `:hover`
+   ordinarily wouldn't even apply on a touchscreen, except mobile Safari/
+   Chrome simulate a "sticky" :hover on tap for compatibility with
+   hover-authored sites -- scoping these rules to `(hover: hover)` opts
+   back out of that simulation without touching the resize-arms-
+   selection behavior itself, which lives entirely in JS drag-start
+   handling and is untouched here. */
+@media (hover: hover) {
+  .col-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
+  .row-resize-handle:hover { background: var(--color-accent); opacity: 0.5; }
+}
 
 .cell-input {
   width: 100%;

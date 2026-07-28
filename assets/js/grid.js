@@ -539,7 +539,14 @@ export class Grid {
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    headRow.appendChild(document.createElement('th'));
+    const cornerTh = document.createElement('th');
+    // The blank corner cell (no data-row-index/data-col-index -- it's a
+    // hit-testing spacer, not a real row/column header, see
+    // _resolveDragTarget's 'col'-case comment above) previously had no
+    // click behavior at all. Clicking it now deselects any current
+    // cell/range selection.
+    cornerTh.addEventListener('click', () => this._deselectAll());
+    headRow.appendChild(cornerTh);
     for (let c = 0; c < this.cols; c++) {
       const letter = colLetter(c);
       const th = document.createElement('th');
@@ -2724,6 +2731,22 @@ export class Grid {
       const el = this._cellEl(ref);
       if (el) el.classList.add('selected');
     }
+  }
+
+  /**
+   * Clears any current cell/range selection -- same end state as if
+   * nothing had ever been selected. Used by the blank corner header
+   * cell's click handler (see _build()); factored out rather than inlined
+   * there so it stays in the same neighborhood as _select/_highlightRange
+   * and picks up any future changes to what "selected" means.
+   */
+  _deselectAll() {
+    if (this.editingInput) this._commitEdit();
+    this.anchor = null;
+    this.selected = null;
+    this.table.querySelectorAll('td.selected').forEach((el) => el.classList.remove('selected'));
+    this.container.dispatchEvent(new CustomEvent('cellselect', { detail: { ref: null } }));
+    if (this.onSelectionChange) this.onSelectionChange(null);
   }
 
   _rangeRefs(a, b) {
