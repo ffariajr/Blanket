@@ -87,7 +87,32 @@ const ACTION_NEEDS = {
 const LEGACY_COLS = 30; // A..AD
 const LEGACY_ROWS = 100;
 const DEFAULT_COL_WIDTH = 96;
+// DEFAULT_ROW_HEIGHT (and every custom this.rowHeights[row] value) is the
+// CONTENT height grid.js writes to a row's <tr>/<td>/.cell-content inline
+// `style.height` -- see _createRowNode/_applyRowHeights/_renderCell -- and
+// stays correct exactly as-is for every one of those style-setting call
+// sites, which just need SOME content-height number, not a true on-screen
+// pixel pitch. It is NOT the actual rendered distance from one row's top to
+// the next: table.grid th/td's own `padding: 2px 6px` plus the ~1px
+// collapsed border (app.css) sit on top of that content height, and a
+// <tr>/<td>'s CSS height is only ever a layout FLOOR under table layout,
+// never a ceiling -- unlike a <col> width under table-layout:fixed, which
+// IS authoritative (confirmed: columns have no analogous gap). Any row-
+// POSITION/pixel-offset math (_rowTops() and everything built from it --
+// _captureScrollAnchor/_restoreScrollAnchor/_findOffsetIndex/
+// _computeVisibleWindow/scroll-anchor restore) needs the true rendered
+// pitch, not this raw content height -- see _rowChromeOverheadPx().
 const DEFAULT_ROW_HEIGHT = 28;
+// Last-resort fallback for _rowChromeOverheadPx() below, only used before
+// any real <tr> has ever been mounted to measure from (so this number
+// never actually has to stay in perfect sync with app.css -- it's just a
+// documented, plausible starting guess: 2px top + 2px bottom padding, plus
+// ~1px from the collapsed border). Derived from table.grid th/td's own
+// `padding: 2px 6px` and `border-collapse: collapse` (app.css) -- if that
+// CSS ever changes, _rowChromeOverheadPx() measuring a real mounted row
+// self-corrects automatically; only a session with literally zero rows
+// ever mounted would still see this guess, and even then only transiently.
+const ROW_CHROME_OVERHEAD_FALLBACK_PX = 5;
 const MIN_COL_WIDTH = 32;
 const MIN_ROW_HEIGHT = 18;
 // How long a touch has to hold still before it's treated as "starting a
@@ -191,6 +216,11 @@ export class Grid {
     this.cells = doc.cells || {};
     this.columnWidths = doc.columnWidths || {};
     this.rowHeights = doc.rowHeights || {};
+    // Cache for _rowChromeOverheadPx() -- lazily measured from the first
+    // real mounted <tr> this instance ever sees, then reused forever after
+    // (it's a CSS-derived constant, not something that changes per row/
+    // scroll/rebuild -- see that method's doc comment).
+    this._rowChromeOverheadCache = null;
     this.cols = doc.cols || LEGACY_COLS;
     this.rows = doc.rows || LEGACY_ROWS;
     this.onChange = onChange || (() => {});
@@ -958,17 +988,63 @@ export class Grid {
     return p.col >= 0 && p.col < this.cols && p.row >= 0 && p.row < this.rows;
   }
 
+  /**
+   * The real per-row pixel PITCH is always a row's declared content height
+   * (this.rowHeights[row] || DEFAULT_ROW_HEIGHT -- see that constant's own
+   * doc comment) PLUS a fixed chrome overhead (table.grid th/td's own
+   * `padding: 2px 6px` plus the ~1px collapsed border, app.css) that sits
+   * ON TOP of it -- a <tr>'s CSS height is only ever a floor under table
+   * layout, never a ceiling. This overhead doesn't depend on whether the
+   * row's own declared height is the default or a user-customized one:
+   * confirmed via real-Chromium measurement that a row given an explicit
+   * custom height (e.g. 60px) renders at exactly that height plus the SAME
+   * overhead a default row gets (28px -> 33px, 60px -> 65px), not some
+   * different, height-dependent amount.
+   *
+   * Measured once, from whichever real <tr> happens to be mounted right
+   * now (comparing its declared height against actual
+   * getBoundingClientRect().height), and cached for the rest of this Grid
+   * instance's life (this._rowChromeOverheadCache) -- it's a CSS-derived
+   * constant, not something that changes per row/scroll/rebuild, so unlike
+   * a hardcoded magic number this can never drift out of sync with app.css
+   * again even if that CSS changes later. Falls back to
+   * ROW_CHROME_OVERHEAD_FALLBACK_PX (a plausible guess, not authoritative)
+   * only on the rare call with literally no row mounted yet to measure
+   * from (e.g. before the very first _renderWindow()) -- and deliberately
+   * does NOT cache that fallback, so the very next call (once something IS
+   * mounted) measures for real instead of being stuck on the guess for the
+   * rest of the session.
+   */
+  _rowChromeOverheadPx() {
+    if (this._rowChromeOverheadCache !== null) return this._rowChromeOverheadCache;
+    const rowElements = this._rowElements || [];
+    for (let r = 0; r < rowElements.length; r++) {
+      const tr = rowElements[r];
+      if (!tr) continue;
+      const measured = tr.getBoundingClientRect().height;
+      if (!measured) continue; // detached/not laid out -- not a usable measurement
+      const declared = this.rowHeights[r + 1] || DEFAULT_ROW_HEIGHT;
+      this._rowChromeOverheadCache = measured - declared;
+      return this._rowChromeOverheadCache;
+    }
+    return ROW_CHROME_OVERHEAD_FALLBACK_PX;
+  }
+
   /** Cumulative pixel offsets: index i -> the top of row i (0-indexed),
    * index `this.rows` -> total table height. Recomputed fresh on every
    * call rather than cached -- O(rows), trivial next to the cost of
    * actually creating/destroying DOM nodes, and this avoids having to
    * remember to invalidate a cache at every one of the several places
    * rowHeights can change (live resize drag, remote patch, structural
-   * transform). */
+   * transform). Each row's contribution is its declared content height
+   * PLUS the real rendered chrome overhead -- see _rowChromeOverheadPx()'s
+   * doc comment for why the raw declared height alone (rowHeights[r] ||
+   * DEFAULT_ROW_HEIGHT) is NOT the same as its actual on-screen pitch. */
   _rowTops() {
+    const overhead = this._rowChromeOverheadPx();
     const tops = [0];
     for (let r = 0; r < this.rows; r++) {
-      tops.push(tops[r] + (this.rowHeights[r + 1] || DEFAULT_ROW_HEIGHT));
+      tops.push(tops[r] + (this.rowHeights[r + 1] || DEFAULT_ROW_HEIGHT) + overhead);
     }
     return tops;
   }
@@ -1135,27 +1211,20 @@ export class Grid {
   }
 
   /**
-   * _rowTops()'s cumulative offsets are built from rowHeights -- the
-   * CONTENT height a row's cell-content wrapper is explicitly clipped to
-   * (see _renderCell's own doc comment on why that's a separate div from
-   * the <td> itself), not the actual on-screen height of the rendered
-   * <tr>, which is a few px taller (table.grid td/th's own padding+border,
-   * see app.css) since a <tr>'s CSS height is only ever a floor under
-   * table layout, never a ceiling. That gap is invisible anywhere else in
-   * this file (nothing before virtualization ever computed a pixel
-   * position from rowHeights and compared it against a real scrollTop),
-   * but _scrollRowIntoView's logical-estimate pass above is exactly that
-   * computation -- confirmed via real-Chromium measurement to drift by
-   * multiple rows' worth of px once dozens of rows are mounted at once
-   * (real per-row height minus logical, times however many real rows sit
-   * between the viewport's edge and the target row), enough to leave the
-   * "scrolled into view" row actually just outside the viewport.
+   * _rowTops() (see its own doc comment) already folds in the real
+   * measured chrome overhead via _rowChromeOverheadPx(), so its cumulative
+   * offsets are the true on-screen pitch, not just the raw declared
+   * content height -- this second pass is no longer compensating for that
+   * gap (a prior version of this comment described exactly that gap, back
+   * when _rowTops() didn't yet account for it; that's [043], fixed by
+   * folding the overhead into _rowTops() itself instead of leaving every
+   * caller of it to separately work around the discrepancy).
    *
-   * Also accounts for the sticky <thead> (table.grid thead th { top: 0 },
-   * see app.css): a row whose top is geometrically within the container's
-   * own bounding box can still be entirely covered by the pinned header if
-   * it sits in that reserved band -- the logical model has no notion of
-   * this either.
+   * What this pass IS still needed for: accounting for the sticky <thead>
+   * (table.grid thead th { top: 0 }, see app.css): a row whose top is
+   * geometrically within the container's own bounding box can still be
+   * entirely covered by the pinned header if it sits in that reserved
+   * band -- the logical model has no notion of this either.
    *
    * This runs AFTER the logical-estimate scroll has had a chance to mount
    * the target row (that's the only reason the estimate pass exists at
