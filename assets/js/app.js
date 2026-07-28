@@ -137,6 +137,32 @@ async function resolveTabByOrdinal(spreadsheetId, ordinal) {
   return sorted[ordinal ?? 0] || null;
 }
 
+// Set by the Welcome name-prompt's "Log in instead" bypass button (see
+// promptForNameIfNeeded) to the exact spreadsheet URL (path + query + hash)
+// the visitor was viewing when they clicked it, so renderLogin() can offer
+// a Cancel/Back button back to that exact spreadsheet/tab and redirect
+// there on a successful login instead of the default `#/sheets`. null
+// whenever `#/login` was reached any other way (direct visit, "Log out",
+// etc.) -- those are completely unaffected.
+let spreadsheetReturnUrl = null;
+
+// Mirrors route()'s own URL-parsing branches for exactly one question: is
+// this hash/path combination a spreadsheet-context route (one of the
+// branches below that ends up calling renderSheet/renderNoTabs), as
+// opposed to the bare root/`#/login`/`#/sheets` list routes? Kept as a
+// single helper -- rather than duplicating this logic at each call site --
+// so it can never drift out of sync with route() itself. Used by boot()
+// (skip the required name prompt entirely for a not-logged-in visit to the
+// bare app root, since there's no anonymous content to gate there) and by
+// route() itself (the durable name-prompt re-gate -- see below).
+function isSpreadsheetVisit() {
+  const parts = parseHash();
+  if (parts.length === 0) return !!currentPathGuid();
+  if (parts[0] === 's' && parts[1]) return true;
+  if (parts[0] === 'sheets' && parts[1]) return true;
+  return false;
+}
+
 async function route() {
   const parts = parseHash();
 
@@ -148,6 +174,18 @@ async function route() {
   // guid on this or the next route() call.
   if (parts.length > 0 && currentPathGuid()) {
     history.replaceState(null, '', APP_BASE + window.location.hash);
+  }
+
+  // Durable gate: re-show the required anonymous name prompt before
+  // rendering a spreadsheet-context route whenever not logged in -- not
+  // just on the app's very first boot() (see there). Covers every way of
+  // getting back to a shared-spreadsheet URL without a name: the login
+  // page's own Cancel/Back button (see renderLogin), a raw browser Back/
+  // Forward, or anything else -- not just the one bypass button that
+  // motivated this. promptForNameIfNeeded() itself resolves instantly if a
+  // name/login already exists, so this is cheap/harmless in the common case.
+  if (isSpreadsheetVisit() && !isLoggedIn()) {
+    await promptForNameIfNeeded();
   }
 
   try {
@@ -204,6 +242,21 @@ function renderLogin() {
   const username = el('input', { type: 'text', placeholder: 'Username', autocomplete: 'username' });
   const password = el('input', { type: 'password', placeholder: 'Password', autocomplete: 'current-password' });
 
+  // Snapshotted once per render, not read live off the module variable
+  // below -- this is the one thing that decides whether THIS render of the
+  // page shows a Cancel/Back button and where a successful login goes.
+  // Non-null only when we got here via the Welcome name-prompt's "Log in
+  // instead" bypass (see promptForNameIfNeeded); every other way of
+  // reaching #/login (a direct visit, the "Log out" link, etc.) has
+  // nothing to cancel back to and is completely unaffected below.
+  const returnUrl = spreadsheetReturnUrl;
+
+  function backToSpreadsheet() {
+    spreadsheetReturnUrl = null;
+    history.replaceState(null, '', returnUrl);
+    route();
+  }
+
   const form = el('form', {
     class: 'login-form',
     onsubmit: async (e) => {
@@ -212,8 +265,14 @@ function renderLogin() {
       try {
         const res = await api.login(username.value, password.value);
         setToken(res.token);
-        window.location.hash = '#/sheets';
+        if (returnUrl) backToSpreadsheet();
+        else window.location.hash = '#/sheets';
       } catch {
+        // A single failed attempt must NOT bounce back to the name prompt
+        // -- stays on this page with an inline error, exactly as before,
+        // whether or not a return-to URL is remembered. Only the explicit
+        // Cancel/Back button below (or the durable route()-level re-gate
+        // for any other abandonment of this flow) does that.
         error.textContent = 'Invalid username or password.';
         error.classList.remove('hidden');
       }
@@ -223,6 +282,7 @@ function renderLogin() {
     username,
     password,
     el('button', { class: 'btn btn-block', type: 'submit' }, 'Log in'),
+    returnUrl ? el('button', { class: 'link', type: 'button', onclick: backToSpreadsheet }, 'Cancel') : null,
     error,
     el('p', { class: 'muted' }, 'Have a link to a shared spreadsheet? Just open it — no login needed if the owner allowed anonymous access.'),
   ]);
@@ -1750,11 +1810,23 @@ function renderError(e) {
 //
 // Returns a Promise so boot() can await it -- unlike every other dialog in
 // this app, this one deliberately has NO backdrop-click-to-close and NO
-// Close/Cancel button: a blank submit re-shows a validation message instead
-// of dismissing, since there's no sensible "anonymous with no name at all"
-// state for the rest of the app to fall back to (Fernando: "do not allow
-// closing with an empty value"). Only reachable at all when NOT logged in
-// (see above), so isLoggedIn() doesn't need checking again inside it.
+// Close/Cancel button that dismisses it in place: a blank submit re-shows a
+// validation message instead of dismissing, since there's no sensible
+// "anonymous with no name at all" state for the rest of the app to fall
+// back to (Fernando: "do not allow closing with an empty value"). Only
+// reachable at all when NOT logged in (see above), so isLoggedIn() doesn't
+// need checking again inside it.
+//
+// This is only ever shown for a spreadsheet-context visit (boot() skips it
+// entirely for a bare not-logged-in root visit, and route()'s own gate only
+// calls this for a spreadsheet-context route -- see both above), so there
+// IS always somewhere sensible to bounce to instead: "Log in instead" below
+// removes the modal WITHOUT resolving this promise (the caller's await
+// simply never continues down this path -- fine and expected, since the
+// hashchange this triggers fires an independent route() call -- the
+// window-level listener near the top of this file -- that renders the
+// login page from here instead) and remembers the current spreadsheet URL
+// so renderLogin() can offer a way back.
 function promptForNameIfNeeded() {
   if (getDisplayName()) return Promise.resolve();
   if (isLoggedIn()) {
@@ -1784,7 +1856,18 @@ function promptForNameIfNeeded() {
             dialog.remove();
             resolve();
           },
-        }, [input, el('button', { class: 'btn', type: 'submit' }, 'Continue')]),
+        }, [
+          input,
+          el('button', { class: 'btn', type: 'submit' }, 'Continue'),
+          el('button', {
+            class: 'link', type: 'button',
+            onclick: () => {
+              spreadsheetReturnUrl = window.location.pathname + window.location.search + window.location.hash;
+              dialog.remove();
+              window.location.hash = '#/login';
+            },
+          }, 'Log in instead'),
+        ]),
       ]),
     ]);
     document.body.appendChild(dialog);
@@ -1818,7 +1901,18 @@ async function boot() {
       if (e instanceof ApiError && e.status === 401) setToken(null);
     }
   }
-  await promptForNameIfNeeded();
+  // A not-logged-in visit to the bare app root (no spreadsheet) has no
+  // anonymous content to gate -- route() already renders the full-page,
+  // non-cancelable login there on its own (parts.length===0, no
+  // currentPathGuid(), !isLoggedIn()), so skip the name prompt entirely
+  // rather than forcing it in front of a login screen the visitor can't
+  // even bypass. Every other case (already logged in, or a spreadsheet
+  // visit) still goes through promptForNameIfNeeded() exactly as before --
+  // including the logged-in "seed the name cookie from the account" path,
+  // which has nothing to do with routing and must still run every boot.
+  if (isLoggedIn() || isSpreadsheetVisit()) {
+    await promptForNameIfNeeded();
+  }
   route();
 }
 
