@@ -438,9 +438,19 @@ function applyRangeFn(fn, rawValues) {
 function applyScalarFn(fn, args) {
   switch (fn) {
     case 'ROUND': {
-      const digits = args.length > 1 ? Math.max(0, Math.trunc(toNumber(args[1]))) : 0;
+      // A negative digits count is valid (Excel/Sheets parity: round to the
+      // nearest 10/100/etc left of the decimal point) -- do NOT clamp it to
+      // 0, that silently downgrades e.g. ROUND(1234.5,-1) to ROUND(1234.5,0).
+      const value = toNumber(args[0]);
+      // Missing value arg (ROUND() with no args) or a non-numeric one both
+      // land here as NaN -- surface the app's normal formula-error
+      // indicator instead of letting NaN leak through arithmetic below and
+      // render as the literal text "NaN".
+      if (isNaN(value)) return '#ERROR';
+      const digits = args.length > 1 ? Math.trunc(toNumber(args[1])) : 0;
+      if (isNaN(digits)) return '#ERROR';
       const factor = Math.pow(10, digits);
-      return Math.round(toNumber(args[0]) * factor) / factor;
+      return Math.round(value * factor) / factor;
     }
     case 'ABS':
       return Math.abs(toNumber(args[0]));
@@ -459,10 +469,19 @@ function applyScalarFn(fn, args) {
   }
 }
 
+// A blank operand (undefined/null/'') is treated as 0 for a numeric
+// comparison, matching the same blank-as-0 convention arithNumber() already
+// applies to +/-/*// and (since the [009] fix) to IF()'s truthiness check --
+// so e.g. a blank A1 in `=A1>=0` correctly evaluates true. A genuine,
+// non-blank text operand that isn't itself numeric-parseable still forces
+// the whole comparison down to a plain string comparison, so
+// `="apple"<"banana"` keeps working as ordinary string comparison.
 function compareValues(op, a, b) {
-  const bothNumeric = !isNaN(toNumber(a)) && !isNaN(toNumber(b)) && typeof a !== 'string' || (typeof a === 'string' && a.trim() !== '' && !isNaN(parseFloat(a)));
-  const na = toNumber(a), nb = toNumber(b);
-  const useNumeric = !isNaN(na) && !isNaN(nb) && (typeof a !== 'string' || a.trim() !== '') && (typeof b !== 'string' || b.trim() !== '');
+  const blankA = a === undefined || a === null || a === '';
+  const blankB = b === undefined || b === null || b === '';
+  const na = blankA ? 0 : toNumber(a);
+  const nb = blankB ? 0 : toNumber(b);
+  const useNumeric = !isNaN(na) && !isNaN(nb);
   const left = useNumeric ? na : toDisplayString(a);
   const right = useNumeric ? nb : toDisplayString(b);
   switch (op) {
@@ -485,8 +504,8 @@ function toNumber(v) {
 // Blank-aware wrapper used only by the +/-/*// operators: a genuinely empty
 // operand (blank cell) should act like 0 (matching how SUM/AVG/etc already
 // treat blanks), but non-numeric text like "hello" must still poison the
-// result as NaN -- toNumber() itself is left untouched since range functions
-// rely on it to filter out blanks via isNaN rather than counting them as 0.
+// result -- toNumber() itself is left untouched since range functions rely
+// on it to filter out blanks via isNaN rather than counting them as 0.
 function arithNumber(v) {
   // A circular-reference sentinel (grid.js's _resolveRef() cycle detection
   // returns the literal string '#ERROR') must poison the whole expression
@@ -497,7 +516,12 @@ function arithNumber(v) {
   // (with no arithmetic) already correctly takes.
   if (v === '#ERROR') throw new Error('#ERROR');
   if (v === undefined || v === null || v === '') return 0;
-  return toNumber(v);
+  const n = toNumber(v);
+  // Non-numeric, non-blank text (e.g. "hello") must also poison the result
+  // via the same #ERROR path, not fall through as NaN -- NaN + 1 renders as
+  // the literal text "NaN" to the user, not a recognizable error indicator.
+  if (isNaN(n)) throw new Error('#ERROR');
+  return n;
 }
 
 function toDisplayString(v) {
