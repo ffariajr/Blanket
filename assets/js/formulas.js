@@ -30,17 +30,46 @@ export function isFormula(value) {
  * args don't match that action's shape.
  */
 const ACTION_ARG_PARSERS = {
-  // USERINFO(cell, infoType[, saveOnEdit=true]) -- see CELL_SCHEMA.md.
+  // USERINFO(cell, cookieName, displayText[, saveOnEdit=true[, validValue1, validValue2, ...]])
+  // -- see CELL_SCHEMA.md. Breaking change from the old
+  // USERINFO(cell, infoType[, saveOnEdit=true]) signature (no
+  // backward-compat shim -- Fernando explicitly approved this as a clean
+  // break): `displayText` is now required (the human-readable label
+  // showUserInfoPrompt() shows for this field), and any number of trailing
+  // string args become that field's dropdown valid-values list instead of
+  // free text. `saveOnEdit`, when present, must actually be a TRUE/FALSE
+  // token -- anything else returns null here, which parseActionGroup()
+  // treats as "not a well-formed action", so grid.js falls through to the
+  // normal formula evaluator and the cell shows #ERROR, matching this app's
+  // existing formula-error convention (see parseActionGroup()'s own doc
+  // comment on what a null action parse means).
   USERINFO(args) {
-    if (args.length < 2 || args.length > 3) return null;
-    if (args[0].kind !== 'ref') return null;
-    if (args[1].kind !== 'string') return null;
-    if (args.length === 3 && args[2].kind !== 'bool') return null;
+    if (args.length < 3) return null;
+    if (args[0].kind !== 'ref') return null; // cell
+    if (args[1].kind !== 'string') return null; // cookieName
+    if (args[2].kind !== 'string') return null; // displayText
+    let saveOnEdit = true;
+    let validValueArgs = args.slice(3);
+    if (args.length >= 4) {
+      if (args[3].kind !== 'bool') return null; // not a real boolean-ish value -- #ERROR via the fallback above
+      saveOnEdit = args[3].value;
+      validValueArgs = args.slice(4);
+    }
+    const validValues = [];
+    for (const a of validValueArgs) {
+      if (a.kind !== 'string') return null; // valid-value args are always quoted strings, same as the app's cell content
+      validValues.push(a.value);
+    }
     return {
       type: 'USERINFO',
       cell: args[0].value,
       infoType: args[1].value,
-      saveOnEdit: args.length === 3 ? args[2].value : true,
+      displayText: args[2].value,
+      saveOnEdit,
+      // [] => free text; length 1 => that one value plus an always-added
+      // blank option; length >= 2 => exactly these options, blank included
+      // only if '' is itself one of them -- see showUserInfoPrompt().
+      validValues,
     };
   },
 };
@@ -698,11 +727,17 @@ export function shiftActionGroupReferences(formula, dimension, boundaryIndex, co
   if (survivors.length === parsed.actions.length && survivors.every((a, i) => a === parsed.actions[i])) return formula; // nothing changed
 
   // Re-serialize: STRING tokens here have no escape syntax (see tokenize()),
-  // and buttonText only ever reached us by having already parsed as one, so
-  // it can't contain an embedded '"' -- plain re-quoting is safe.
+  // and buttonText/infoType/displayText/validValues only ever reached us by
+  // having already parsed as one, so none of them can contain an embedded
+  // '"' -- plain re-quoting is safe. saveOnEdit has to be written out
+  // explicitly (even when it's the default `true`) whenever validValues
+  // follow it -- these are positional args, so there's no way to supply the
+  // 5th+ args without also supplying the 4th.
   const actionCalls = survivors.map((a) => {
-    const tail = a.saveOnEdit === false ? ', FALSE' : '';
-    return `USERINFO(${a.cell}, "${a.infoType}"${tail})`;
+    const parts = [a.cell, `"${a.infoType}"`, `"${a.displayText}"`];
+    if (a.saveOnEdit === false || a.validValues.length) parts.push(a.saveOnEdit ? 'TRUE' : 'FALSE');
+    for (const v of a.validValues) parts.push(`"${v}"`);
+    return `USERINFO(${parts.join(', ')})`;
   });
   return `=ACTIONGROUP("${parsed.buttonText}", ${parsed.hideOnClick ? 'TRUE' : 'FALSE'}${actionCalls.length ? ', ' + actionCalls.join(', ') : ''})`;
 }

@@ -16,7 +16,7 @@
     },
     "C1": { "value": "merged origin", "merge": { "rows": 2, "cols": 3 } },
     "A3": {
-      "value": "=ACTIONGROUP(\"Sign me up\", TRUE, USERINFO(B3, \"name\"), USERINFO(C3, \"email\"))",
+      "value": "=ACTIONGROUP(\"Sign me up\", TRUE, USERINFO(B3, \"name\", \"Your name\"), USERINFO(C3, \"email\", \"Your email\"))",
       "actionState": { "clicked": true }
     },
     "B3": { "value": "Fernando" },
@@ -114,49 +114,87 @@ not a value, and clicking it has side effects tied to the viewer's identity
   `shiftReferencesForStructuralChange()`'s doc comment for why the two
   need different handling).
 
-**`USERINFO(cell, infoType[, saveOnEdit=true])`** — not a standalone
-formula; only valid as an action argument inside `ACTIONGROUP(...)`.
+**`USERINFO(cell, cookieName, displayText[, saveOnEdit=true[, validValue1, validValue2, ...]])`**
+— not a standalone formula; only valid as an action argument inside
+`ACTIONGROUP(...)`. Breaking change from an earlier
+`USERINFO(cell, infoType[, saveOnEdit=true])` signature — no
+backward-compat shim for the old 2/3-arg form; a formula still using it
+now parses to a well-formed-but-rejected action (`ACTION_ARG_PARSERS
+.USERINFO` in `assets/js/formulas.js` returns `null`), which
+`parseActionGroup()` treats the same as any other malformed action —
+the whole cell falls through to the normal formula evaluator and shows
+`#ERROR`, same convention as any other invalid formula.
 
 - `cell`: a plain cell reference (e.g. `B2`) — the *target* this action
   writes into, ordinarily a different cell than the one holding the
   `ACTIONGROUP` formula (e.g. the button lives in `A2`, and `USERINFO(B2,
   ...)`/`USERINFO(C2, ...)` target other cells in that same row).
-- `infoType`: any string a formula author chooses (see `getUserInfoField`/
-  `setUserInfoField` in `assets/js/api.js`) — not a fixed set. `"name"` is
-  just `getDisplayName()`'s cookie, same as everywhere else it's used
-  (save attribution, the first-visit name prompt) — NOT the logged-in
-  account's `display_name`; a logged-in user is free to edit it
-  independently of their permanent account identity. The one thing an
-  account does is seed this cookie once, silently, the first time someone
-  logs in with no cookie yet (`promptForNameIfNeeded()` in `app.js`) — after
-  that one-time seed it's fully independent, and the account's real
-  `display_name` is never read again for this purpose. Every other
-  `infoType` (`"email"` is just the common example, not special-cased
-  beyond having existed here first) has no account-level source available
-  client-side regardless, so it's cookie-backed only, keyed dynamically by
-  the field name itself (`encodeURIComponent`'d, since a cookie name can't
-  contain `;`/`=`/whitespace and `infoType` is arbitrary formula-author
-  input, not a fixed set this code controls).
-- `saveOnEdit` (bool, 3rd arg, defaults `true`): if `TRUE`, `cell` is also
-  *watched* — see below. Pass `FALSE` to opt out.
+- `cookieName` (was `infoType`): any string a formula author chooses (see
+  `getUserInfoField`/`setUserInfoField` in `assets/js/api.js`) — not a
+  fixed set. `"name"` is just `getDisplayName()`'s cookie, same as
+  everywhere else it's used (save attribution, the first-visit name
+  prompt) — NOT the logged-in account's `display_name`; a logged-in user
+  is free to edit it independently of their permanent account identity.
+  The one thing an account does is seed this cookie once, silently, the
+  first time someone logs in with no cookie yet
+  (`promptForNameIfNeeded()` in `app.js`) — after that one-time seed it's
+  fully independent, and the account's real `display_name` is never read
+  again for this purpose. Every other `cookieName` (`"email"` is just the
+  common example, not special-cased beyond having existed here first) has
+  no account-level source available client-side regardless, so it's
+  cookie-backed only, keyed dynamically by the field name itself
+  (`encodeURIComponent`'d, since a cookie name can't contain `;`/`=`/
+  whitespace and `cookieName` is arbitrary formula-author input, not a
+  fixed set this code controls).
+- `displayText` (string, required): the human-readable label
+  `showUserInfoPrompt()`'s consolidated dialog shows for this field,
+  instead of the raw `cookieName` string.
+- `saveOnEdit` (bool, 4th arg, defaults `true`): if `TRUE`, `cell` is also
+  *watched* — see below. Pass `FALSE` to opt out. Must be a real
+  `TRUE`/`FALSE` token when present — anything else is a parse failure
+  (`#ERROR`), not silently coerced.
+- `validValue1, validValue2, ...` (0 or more quoted strings, 5th+ args):
+  when present, `showUserInfoPrompt()` renders this field as a `<select>`
+  dropdown instead of a free-text `<input>`. Exactly one `validValue`
+  means that value is the only real option, but a blank option is always
+  additionally offered (blank is implicitly a valid state on its own).
+  Two or more `validValue`s are used exactly as given, with no blank
+  option added on top — if the formula author wants blank to be choosable
+  there too, one of the `validValue`s must itself be the empty string
+  `""`, in which case it just appears in the list like any other option
+  (nothing special beyond that). Since these are positional args,
+  `saveOnEdit` must be given explicitly (`TRUE` or `FALSE`) whenever any
+  `validValue` is supplied, even to keep the default `TRUE`.
 
-**On click**, `Grid._runActionGroup()` first collects every `infoType`
-referenced anywhere in the group (deduped, with its current value if any)
-and, only if at least one is missing, awaits ONE dialog (app.js's
-`showUserInfoPrompt`, wired in as `Grid`'s `onNeedUserInfo` option) listing
-ALL of them — not just the missing ones, so an already-known field shows
-up pre-filled and still editable — each optional, in one form instead of a
-native prompt per field. (This replaced an earlier version that called
-`window.prompt()` once per missing field and mislabeled anything besides
-literal `"email"` as "Your name" — a bug from before `infoType` accepted
-arbitrary strings.) Once resolved, each action in order writes its value
-into `cell` via `Grid.setCellValue()` — the same commit path as typing/the
-formula bar/paste, not a parallel one; a field left blank (or the whole
-dialog dismissed) means that one action is skipped, the rest of the
-group's actions and `hideOnClick` still proceed. If `hideOnClick` is
-`TRUE`, the `ACTIONGROUP` cell itself then gets `actionState: {clicked:
-true}` in a separate patch (the formula stays intact — a reload still
-shows the same button, just disabled).
+**On click**, `Grid._runActionGroup()` first collects every `cookieName`
+referenced anywhere in the group (deduped, with its current value,
+`displayText`, and `validValues` if any) and, only if at least one is
+missing a value, awaits ONE dialog (app.js's `showUserInfoPrompt`, wired in
+as `Grid`'s `onNeedUserInfo` option) listing ALL of them — not just the
+missing ones, so an already-known field shows up pre-filled and still
+editable — each optional, in one form instead of a native prompt per field.
+(This replaced an earlier version that called `window.prompt()` once per
+missing field and mislabeled anything besides literal `"email"` as "Your
+name" — a bug from before `infoType`/`cookieName` accepted arbitrary
+strings.) Once resolved, each action in order writes its value into `cell`
+via `Grid.setCellValue()` — the same commit path as typing/the formula
+bar/paste, not a parallel one; a field left blank (or the whole dialog
+dismissed) means that one action is skipped, the rest of the group's
+actions and `hideOnClick` still proceed. If `hideOnClick` is `TRUE`, the
+`ACTIONGROUP` cell itself then gets `actionState: {clicked: true}` in a
+separate patch (the formula stays intact — a reload still shows the same
+button, just disabled).
+
+**A genuine cancel (backdrop click/Escape) is different from a
+submit-with-blanks.** `showUserInfoPrompt()` resolves `null` specifically
+for a backdrop-click/Escape dismissal (as opposed to resolving an object of
+entered values, possibly with some/all left blank, on an actual Save
+submit). `_runActionGroup()` only reaches this dialog at all when at least
+one field was missing to begin with; if it resolves `null`, the whole click
+is aborted — no action runs, not even ones whose value was already known
+(and pre-filled) before the dialog opened, and `hideOnClick` doesn't apply
+either. Fernando: clicking outside the dialog should mean nothing happened,
+not "fill in whatever was already known and skip the rest."
 
 **`saveOnEdit` — catching a hand-typed edit, not just the button.**
 Fernando's own description of why this exists: "the problem is that a

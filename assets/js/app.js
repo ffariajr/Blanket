@@ -1286,7 +1286,7 @@ const FORMULA_HELP = [
   { name: 'ABS(value)', desc: 'Absolute value.', example: '=ABS(-5)' },
   { name: 'IF(condition, then, else)', desc: 'Condition uses =, <>, <, >, <=, >= (or any nonzero number counts as true). "else" is optional.', example: '=IF(A1>10, "big", "small")' },
   { name: 'CONCAT(...) / CONCATENATE(...)', desc: 'Joins any number of values into one piece of text.', example: '=CONCAT(A1, " ", B1)' },
-  { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once.', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name"), USERINFO(C2, "email"))' },
+  { name: 'ACTIONGROUP(buttonText, hideOnClick, action1, ...)', desc: 'Renders a button; clicking it runs each action in order. hideOnClick=TRUE disables the button (for everyone, permanently) after it’s clicked once.', example: '=ACTIONGROUP("Sign me up", TRUE, USERINFO(B2, "name", "Your name"), USERINFO(C2, "email", "Your email"))' },
 ];
 
 // Actions (currently just USERINFO) only make sense as an argument to
@@ -1297,7 +1297,7 @@ const FORMULA_HELP = [
 // section from FORMULA_HELP so the help dialog can explain that distinction
 // instead of presenting actions as if they were ordinary functions.
 const ACTION_HELP = [
-  { name: 'USERINFO(cell, infoType[, saveOnEdit=true])', desc: 'Used inside ACTIONGROUP(...). Fills `cell` with the clicker’s saved value for infoType — any name you pick, e.g. "name", "email", "phone". saveOnEdit defaults to TRUE, so a manual edit to `cell` also saves back; pass FALSE to turn that off.', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name"), USERINFO(B3, "phone"))' },
+  { name: 'USERINFO(cell, cookieName, displayText[, saveOnEdit=true[, validValue1, ...]])', desc: 'Used inside ACTIONGROUP(...). Fills `cell` with the clicker’s saved value for cookieName — any name you pick, e.g. "name", "email", "phone" — and labels the field `displayText` in the prompt dialog. saveOnEdit defaults to TRUE, so a manual edit to `cell` also saves back; pass FALSE to turn that off. Add one or more quoted validValues to turn the field into a dropdown instead of free text: one value also allows a blank option; two or more are used exactly as given (blank only if one of them is "").', example: '=ACTIONGROUP("Fill in", FALSE, USERINFO(B2, "name", "Your name"), USERINFO(B3, "role", "Role", TRUE, "Usher", "Greeter"))' },
 ];
 
 function showFormulaHelp() {
@@ -1354,6 +1354,23 @@ function showFormulaHelp() {
 }
 
 /**
+ * A field's dropdown option list, or null for free text -- see USERINFO's
+ * doc comment in formulas.js for the exact rule this mirrors:
+ *   - no validValues at all: null (free text <input>).
+ *   - exactly one validValue: that value plus an always-added blank option,
+ *     regardless of whether the one value is itself blank.
+ *   - two or more validValues: exactly those, verbatim -- blank is only
+ *     among them if the formula author put an empty string in the list,
+ *     never added on top.
+ */
+function userInfoOptionValues(field) {
+  const values = field.validValues || [];
+  if (!values.length) return null;
+  if (values.length === 1) return [...new Set(['', values[0]])];
+  return values;
+}
+
+/**
  * Grid's onNeedUserInfo hook (see grid.js's _runActionGroup) -- one
  * consolidated dialog for every USERINFO field an ACTIONGROUP click needs,
  * instead of a native window.prompt() per missing field (the old behavior
@@ -1362,10 +1379,18 @@ function showFormulaHelp() {
  * referenced by the group, not just the missing ones -- an already-known
  * field is pre-filled and still editable, per Fernando: "show all userinfo
  * values, with the ones that have cookies already pre-filled in but
- * editable." Every field is optional (blank = that action gets skipped,
- * same as the old "user cancelled" outcome) -- unlike the required
- * first-visit name prompt, this one closes on a backdrop click, since
- * dismissing it is equivalent to leaving every field blank.
+ * editable." Each field is labeled with its `displayText` (the formula
+ * author's human-readable label -- see USERINFO's signature in
+ * formulas.js), not the raw cookie name. A field with `validValues` renders
+ * as a <select> (see userInfoOptionValues() above) instead of a free-text
+ * <input>. Every field is optional (blank = that action gets skipped, same
+ * as the old "user cancelled" outcome) -- unlike the required first-visit
+ * name prompt, this one closes on a backdrop click, since dismissing it is
+ * equivalent to leaving every field blank -- EXCEPT that grid.js's
+ * _runActionGroup treats a backdrop/Escape cancel (this resolving `null`)
+ * as aborting the entire button click, not just "every field blank" (see
+ * its own doc comment) -- Fernando: clicking outside the dialog should
+ * cancel the whole thing, not partially fill in the row.
  */
 function showUserInfoPrompt(fields) {
   return new Promise((resolve) => {
@@ -1386,10 +1411,14 @@ function showUserInfoPrompt(fields) {
             resolve(values);
           },
         }, [
-          ...fields.map((f) => el('label', { class: 'userinfo-prompt-field' }, [
-            f.infoType,
-            (inputs[f.infoType] = el('input', { type: 'text', value: f.value || '' })),
-          ])),
+          ...fields.map((f) => {
+            const options = userInfoOptionValues(f);
+            const field = options
+              ? el('select', {}, options.map((v) => el('option', { value: v, selected: v === (f.value || '') || null }, v)))
+              : el('input', { type: 'text', value: f.value || '' });
+            inputs[f.infoType] = field;
+            return el('label', { class: 'userinfo-prompt-field' }, [f.displayText || f.infoType, field]);
+          }),
           el('button', { class: 'btn', type: 'submit' }, 'Save'),
         ]),
       ]),

@@ -55,19 +55,27 @@ const ACTION_EXECUTORS = {
 
 /**
  * Parallel to ACTION_EXECUTORS: for an action type with a user-resolvable
- * field, returns {key, value} (value = its current cookie/account value,
- * possibly '') so _runActionGroup can collect every field referenced
- * anywhere in the group -- across every action, not just the ones missing
- * a value -- and decide as a whole whether to show app.js's consolidated
- * onNeedUserInfo dialog (only if at least one is missing) with all of them
- * listed (so an already-known field is shown pre-filled/editable, not
- * hidden). A future action type with its own resolvable field plugs in
- * here the same way, without _runActionGroup itself knowing anything
- * about "infoType" or USERINFO specifically.
+ * field, returns {key, value, displayText, validValues} (value = its
+ * current cookie/account value, possibly '') so _runActionGroup can collect
+ * every field referenced anywhere in the group -- across every action, not
+ * just the ones missing a value -- and decide as a whole whether to show
+ * app.js's consolidated onNeedUserInfo dialog (only if at least one is
+ * missing) with all of them listed (so an already-known field is shown
+ * pre-filled/editable, not hidden). displayText/validValues travel with the
+ * field so showUserInfoPrompt() can label it properly and render a dropdown
+ * instead of free text when the formula author supplied valid values (see
+ * USERINFO's own doc comment in formulas.js). A future action type with its
+ * own resolvable field plugs in here the same way, without _runActionGroup
+ * itself knowing anything about "infoType" or USERINFO specifically.
  */
 const ACTION_NEEDS = {
   USERINFO(action) {
-    return { key: action.infoType, value: getUserInfoField(action.infoType) };
+    return {
+      key: action.infoType,
+      value: getUserInfoField(action.infoType),
+      displayText: action.displayText,
+      validValues: action.validValues,
+    };
   },
 };
 
@@ -2052,8 +2060,18 @@ export class Grid {
    * on that same target (see _buildActionGroupWatches) also gets a chance
    * to fire (a no-op in practice: the value being written back to
    * cookie/DB is the same one just read from there). An action left
-   * blank in the dialog (or the whole dialog dismissed) is skipped without
-   * aborting the rest.
+   * blank in the dialog (or the whole dialog dismissed with something still
+   * pre-filled) is skipped without aborting the rest -- but a genuine
+   * backdrop-click/Escape cancel of the dialog (this.onNeedUserInfo
+   * resolving `null`, as opposed to resolving an object of entered/blank
+   * values) aborts the WHOLE click instead: no action runs, not even ones
+   * whose value was already known before the dialog opened, and
+   * `hideOnClick` doesn't apply either. Fernando: clicking outside the
+   * dialog should mean nothing happened, not "fill in whatever was already
+   * known and skip the rest." Only reachable when the dialog was actually
+   * shown (see the `if` just above) -- if nothing was missing, the dialog
+   * never opens and `entered` is never even asked for, so there's nothing
+   * to have cancelled.
    *
    * hideOnClick's disabled state is a separate, explicit patch to the
    * ACTIONGROUP cell itself (`actionState`, not `value` -- the formula
@@ -2067,16 +2085,17 @@ export class Grid {
     const fields = new Map();
     for (const action of actions) {
       const need = ACTION_NEEDS[action.type] && ACTION_NEEDS[action.type](action);
-      if (need && !fields.has(need.key)) fields.set(need.key, need.value);
+      if (need && !fields.has(need.key)) fields.set(need.key, need);
     }
-    const resolved = Object.fromEntries(fields);
-    if ([...fields.values()].some((v) => !v)) {
-      const entered = await this.onNeedUserInfo([...fields.entries()].map(([infoType, value]) => ({ infoType, value })));
-      if (entered) {
-        for (const [key, value] of Object.entries(entered)) {
-          const trimmed = (value || '').trim();
-          if (trimmed) { setUserInfoField(key, trimmed); resolved[key] = trimmed; }
-        }
+    const resolved = Object.fromEntries([...fields].map(([key, need]) => [key, need.value]));
+    if ([...fields.values()].some((need) => !need.value)) {
+      const entered = await this.onNeedUserInfo([...fields.entries()].map(([infoType, need]) => ({
+        infoType, value: need.value, displayText: need.displayText, validValues: need.validValues,
+      })));
+      if (entered === null) return; // backdrop/Escape cancel -- abort the whole click, run nothing
+      for (const [key, value] of Object.entries(entered)) {
+        const trimmed = (value || '').trim();
+        if (trimmed) { setUserInfoField(key, trimmed); resolved[key] = trimmed; }
       }
     }
 
