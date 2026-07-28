@@ -1425,7 +1425,7 @@ function showUserInfoPrompt(fields) {
     ]);
     document.body.appendChild(dialog);
     const firstInput = inputs[fields[0].infoType];
-    if (firstInput) firstInput.focus();
+    wireModalA11y(dialog, firstInput, () => { dialog.remove(); resolve(null); });
   });
 }
 
@@ -1722,7 +1722,7 @@ function showRenameSpreadsheet(spreadsheet, onDone) {
     ]),
   ]);
   document.body.appendChild(dialog);
-  input.focus();
+  wireModalA11y(dialog, input);
   input.select();
 }
 
@@ -1761,7 +1761,7 @@ function showRenameTab(tabId, currentName, onDone) {
     ]),
   ]);
   document.body.appendChild(dialog);
-  input.focus();
+  wireModalA11y(dialog, input);
   input.select();
 }
 
