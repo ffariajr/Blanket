@@ -956,7 +956,7 @@ async function renderSheet(spreadsheetId, tabId) {
     onState: (data) => {
       grid.setDocument(data || { cells: {} });
     },
-    onRemoteEdit: (patch, from, structuralOps) => grid.applyRemote(patch, structuralOps),
+    onRemoteEdit: (patch, from, structuralOps, isSelfStructuralEcho) => grid.applyRemote(patch, structuralOps, isSelfStructuralEcho),
     onRemoteKeystroke: () => {
       /* could show a "someone is typing" indicator; kept minimal */
     },

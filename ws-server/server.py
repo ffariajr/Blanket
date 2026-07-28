@@ -29,7 +29,8 @@ Client -> server, after hello:
     dropped) from view-only clients.
   {"type": "new_edit", "payload": <JSON Merge Patch, RFC 7396>,
    "structuralOps": [{"dimension": "row"|"col", "boundaryIndex": N,
-     "count": N, "isInsert": true|false}, ...]}
+     "count": N, "isInsert": true|false}, ...],
+   "structuralEchoId": "<opaque client-generated string>"}
     `payload` is applied to the in-memory document immediately, then
     rebroadcast to other clients, independent of persistence timing.
     Rejected (with an "error" reply) from view-only clients.
@@ -46,6 +47,19 @@ Client -> server, after hello:
     kept the same numeric scroll position across a remote insert/delete,
     but the row/column now rendered there had silently shifted underneath
     it.
+    `structuralEchoId` is OPTIONAL (only ever sent alongside `structuralOps`)
+    and, like `structuralOps`, is a pure relay hint the server never
+    inspects, generates, or persists -- just an opaque token ws.js makes up
+    once per outgoing structural edit and rides back verbatim on this same
+    message's `new_edit` echo to EVERY client, including the sender (see
+    session.py's handle_new_edit/`_broadcast_all`). The sender's own ws.js
+    recognizes its own token coming back and tells grid.js's applyRemote()
+    to skip re-remapping a scroll anchor it already remapped locally and
+    synchronously the moment it made the edit -- otherwise the SENDER's own
+    view double-applies that remap on top of its own already-correct one
+    (BUGS_FOUND.md [039]). Every other recipient never generated this token
+    themselves, so it's simply absent from their own "is this my echo?"
+    check and their remap proceeds exactly as before.
   {"type": "save"}
     Forces an immediate persist if the document has unsaved changes.
   {"type": "presence_active", "active": true|false}
@@ -63,10 +77,11 @@ Server -> client:
   {"type": "state", "sequence": N, "data": {...}}
     Sent once, right after hello: the tab's current full document.
   {"type": "new_edit", "from": {"user_id":.., "name":".."}, "payload": {...},
-   "structuralOps": [...]}
-    Another client's edit, relayed. `structuralOps` (see the client->server
-    "new_edit" entry above) is included verbatim, only when the sender's
-    message included it.
+   "structuralOps": [...], "structuralEchoId": "..."}
+    Another client's edit, relayed (also delivered back to the client that
+    sent it -- see session.py's handle_new_edit). `structuralOps` and
+    `structuralEchoId` (see the client->server "new_edit" entry above) are
+    each included verbatim, only when the sender's message included them.
   {"type": "keystroke", "from": {...}, "payload": {...}}
     Another client's keystroke event, relayed.
   {"type": "saved", "sequence": N}
@@ -209,7 +224,10 @@ async def handle_connection(websocket):
             msg_type = message.get("type")
             if msg_type == "new_edit":
                 await session.handle_new_edit(
-                    websocket, message.get("payload", {}), message.get("structuralOps")
+                    websocket,
+                    message.get("payload", {}),
+                    message.get("structuralOps"),
+                    message.get("structuralEchoId"),
                 )
             elif msg_type == "keystroke":
                 await session.handle_keystroke(websocket, message.get("payload", {}))

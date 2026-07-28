@@ -62,11 +62,38 @@ export class TabSocket {
     // session.py's handle_new_edit -- so it's purely a live-relay hint,
     // never persisted into the document itself.
     this._pendingStructuralOps = [];
+    // BUGS_FOUND.md [039]: `new_edit` echoes back to its own sender too
+    // (see ws-server/session.py's handle_new_edit -- deliberate, for the
+    // [001] same-cell-race fix), but a structural insert/delete's own
+    // Grid._transformStructure already remapped this client's scroll
+    // anchor locally and synchronously the moment the edit was made --
+    // reapplying that remap again when the echo of THIS SAME edit comes
+    // back would double it. `_selfStructuralEchoIds` holds the opaque
+    // id (see _nextStructuralEchoId below) of every structural edit this
+    // socket has sent and not yet seen echoed back, so the 'new_edit'
+    // handler below can tell "this is my own edit coming back, skip the
+    // remap" apart from "this is a genuinely new structural op from
+    // someone else, apply the remap" (same wire message either way,
+    // since it's a plain broadcast-to-everyone). A Set, not a queue --
+    // nothing here relies on FIFO order, only on later membership-testing
+    // a specific id exactly once.
+    this._selfStructuralEchoIds = new Set();
+    this._nextStructuralEchoSeq = 0;
     this._editTimer = null;
     this._lastKeystrokeSent = 0;
     this._lastActiveSent = null; // null until the first send, so the first real state always goes out even if it's `false`
     this._pendingSelection = undefined; // undefined = nothing queued; null is itself a valid "no selection" value to send
     this._selectionTimer = null;
+    // Per-instance random prefix for _selfStructuralEchoIds' tokens above --
+    // guarantees this socket's ids can never collide with another tab's/
+    // another user's own ids for the same tab_id (each is its own
+    // TabSocket instance), without needing any server-side bookkeeping at
+    // all (the server treats the whole id as an opaque pass-through, see
+    // ws-server/session.py). crypto.randomUUID() isn't available in every
+    // context (e.g. non-secure origin) -- Math.random is more than enough
+    // entropy for "never collides with a handful of concurrent editors,"
+    // which is all this needs.
+    this._instanceId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
   }
 
   connect() {
@@ -106,9 +133,22 @@ export class TabSocket {
         case 'state':
           this.onState(msg.data, msg.sequence);
           break;
-        case 'new_edit':
-          this.onRemoteEdit(msg.payload, msg.from, msg.structuralOps);
+        case 'new_edit': {
+          // BUGS_FOUND.md [039]: recognize our own structural edit
+          // looping back to us (see _selfStructuralEchoIds above) and
+          // tell the caller so it can skip re-applying the scroll-anchor
+          // remap it already applied locally when it made this edit.
+          // Consumed on first sight -- this exact id is only ever echoed
+          // back once, and leaving it in the set would just be a
+          // permanent (if harmless) leak.
+          let isSelfStructuralEcho = false;
+          if (msg.structuralEchoId && this._selfStructuralEchoIds.has(msg.structuralEchoId)) {
+            this._selfStructuralEchoIds.delete(msg.structuralEchoId);
+            isSelfStructuralEcho = true;
+          }
+          this.onRemoteEdit(msg.payload, msg.from, msg.structuralOps, isSelfStructuralEcho);
           break;
+        }
         case 'keystroke':
           this.onRemoteKeystroke(msg.payload, msg.from);
           break;
@@ -235,7 +275,20 @@ export class TabSocket {
     // case, and lets an older server ignore it fine either way (it's a
     // sibling of `payload`, never merged into the persisted document -- see
     // ws-server/session.py's handle_new_edit).
-    if (this._pendingStructuralOps.length) msg.structuralOps = this._pendingStructuralOps;
+    if (this._pendingStructuralOps.length) {
+      msg.structuralOps = this._pendingStructuralOps;
+      // BUGS_FOUND.md [039]: tag this send so the self-echo of THIS exact
+      // message (see the 'new_edit' case above) can be recognized and its
+      // scroll-anchor remap skipped -- every op accumulated into this one
+      // flush already had its remap applied locally, synchronously, one at
+      // a time, by grid.js's _transformStructure as each happened, so one
+      // id per flushed message (not per individual op) is the right
+      // granularity: either the whole message is this socket's own echo,
+      // or none of it is.
+      const echoId = `${this._instanceId}:${this._nextStructuralEchoSeq++}`;
+      msg.structuralEchoId = echoId;
+      this._selfStructuralEchoIds.add(echoId);
+    }
     this._send(msg);
     this._pendingPatch = null;
     this._pendingStructuralOps = [];

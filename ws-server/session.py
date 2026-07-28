@@ -348,7 +348,7 @@ class TabSession:
         except Exception:
             logger.exception("congestion_promote send failed, dropping client")
 
-    async def handle_new_edit(self, ws, payload, structural_ops=None):
+    async def handle_new_edit(self, ws, payload, structural_ops=None, structural_echo_id=None):
         from merge_patch import apply_merge_patch
 
         client = self.clients[ws]
@@ -387,6 +387,22 @@ class TabSession:
         # the same message shape as before this existed.
         if structural_ops:
             message["structuralOps"] = structural_ops
+        # `structural_echo_id` (BUGS_FOUND.md [039]): opaque, purely a
+        # relay-back-verbatim token the SENDER made up for its own use --
+        # this process never inspects or generates it, just threads it
+        # through the same broadcast-to-everyone `structural_ops` already
+        # rides on. It exists so that when this message loops back to its
+        # own sender (the _broadcast_all above, same self-echo the [001]
+        # comment describes), that client's ws.js can recognize "this is
+        # MY OWN structural op being echoed back -- I already remapped my
+        # scroll anchor for it locally and synchronously the moment I made
+        # the edit (grid.js's _transformStructure), applying that same
+        # remap again on top of this echo would double it." Every OTHER
+        # recipient just ignores a field it never sent itself, so their
+        # (already-correct, per prior verification) remote-remap behavior
+        # in applyRemote() is untouched.
+        if structural_echo_id is not None:
+            message["structuralEchoId"] = structural_echo_id
         await self._broadcast_all(message)
         self._schedule_persist()
 

@@ -392,8 +392,20 @@ export class Grid {
    *   on the SENDING client. Used below to remap THIS viewer's own scroll
    *   anchor by the same boundaryIndex/count/isInsert the sender's local
    *   _transformStructure used on itself -- see the `structural` branch.
+   * @param {boolean} [isSelfStructuralEcho] -- BUGS_FOUND.md [039]: true
+   *   when this `patch`/`structuralOps` is this SAME client's own
+   *   structural edit looping back to it (ws-server/session.py broadcasts
+   *   every accepted edit to everyone, including the sender -- see the
+   *   [001] fix's comment there). This client's own Grid._transformStructure
+   *   already remapped its scroll anchor for these exact ops locally and
+   *   synchronously the moment it made the edit, so the remap below must be
+   *   skipped here -- applying it again on top of that already-correct
+   *   remap would double it (overshoot on insert, wrong content on
+   *   delete). The rest of this patch is still applied as normal (cheap,
+   *   and already idempotent against a self-replay -- see the `payload`
+   *   entry in ws-server/server.py's docstring).
    */
-  applyRemote(patch, structuralOps) {
+  applyRemote(patch, structuralOps, isSelfStructuralEcho) {
     // Captured unconditionally, before anything below might mutate
     // this.cells/rows/cols -- cheap, and only actually used if this patch
     // turns out to force a structural rebuild (see the `structural` branch
@@ -480,8 +492,18 @@ export class Grid {
       // or a patch from a pre-this-fix sender) leaves rowIndex/colIndex
       // undefined, so _restoreScrollAnchor falls back to the plain
       // captured index, matching the previous (pre-fix) behavior.
+      //
+      // BUGS_FOUND.md [039]: also skipped (same undefined fallback) when
+      // `isSelfStructuralEcho` -- this exact patch is this same client's
+      // own edit looping back to it (see this method's doc comment), and
+      // `scrollAnchor` was captured fresh at the top of this call, i.e.
+      // AFTER _transformStructure already remapped-and-restored the anchor
+      // locally for this same op -- so it's already sitting at the correct
+      // post-edit position and needs no further adjustment. Remapping it
+      // again here would double-apply the same shift on top of that
+      // already-correct one.
       let newRowIndex, newColIndex;
-      if (scrollAnchor && Array.isArray(structuralOps)) {
+      if (scrollAnchor && Array.isArray(structuralOps) && !isSelfStructuralEcho) {
         newRowIndex = scrollAnchor.rowIndex;
         newColIndex = scrollAnchor.colIndex;
         for (const op of structuralOps) {
