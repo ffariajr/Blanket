@@ -45,6 +45,18 @@ final class Db
             throw new \RuntimeException('Database connection is not using TLS');
         }
 
+        // The DB host's MySQL session time zone defaults to SYSTEM, which
+        // on this host is NOT UTC (observed ~5h behind true UTC). TIMESTAMP
+        // columns (created_at/updated_at, all DEFAULT CURRENT_TIMESTAMP)
+        // are stored internally in UTC but rendered to/from the session
+        // time zone on read/write -- so leaving this unset makes every
+        // CURRENT_TIMESTAMP() value written (and every created_at string
+        // read back) reflect the server's local wall clock, not UTC. The
+        // frontend (assets/js/app.js) explicitly assumes created_at
+        // strings are UTC. Force UTC on this connection so that
+        // assumption holds for every timestamp written from here on.
+        $pdo->exec("SET time_zone = '+00:00'");
+
         self::$pdo = $pdo;
         return $pdo;
     }
