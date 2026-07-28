@@ -50,7 +50,7 @@ logger = logging.getLogger("blanket.presence")
 # untouched, so some legitimate hue/lightness variety remains; this is not
 # meant to make all 12 look identical.
 _PALETTE = [
-    "#df1849", "#2b8236", "#4363d8", "#bc5309", "#911eb4", "#0a7f7f",
+    "#2b8236", "#df1849", "#4363d8", "#bc5309", "#911eb4", "#0a7f7f",
     "#cb0fc1", "#5e7c05", "#007f7f", "#9a6324", "#800000", "#000075",
 ]
 
